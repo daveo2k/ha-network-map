@@ -460,23 +460,26 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
     def _ha_devices(self) -> dict[str, HaDevice]:
         """MAC -> what other HA integrations know about the device."""
         result: dict[str, HaDevice] = {}
-        entries = {e.entry_id: e.domain for e in self.hass.config_entries.async_entries()}
-        for device in dr.async_get(self.hass).devices.values():
-            if any(ident[0] == DOMAIN for ident in device.identifiers):
+        registry = dr.async_get(self.hass)
+        # Walk devices per config entry: works on every supported HA version and gives the
+        # owning integration directly, without the deprecated registry.devices mapping or
+        # DeviceEntry.config_entries.
+        for entry in self.hass.config_entries.async_entries():
+            if entry.domain == DOMAIN:
                 continue
-            macs = [norm_mac(v) for t, v in device.connections if t == dr.CONNECTION_NETWORK_MAC]
-            macs = [m for m in macs if m]
-            if not macs:
-                continue
-            domain = next((entries[e] for e in device.config_entries if e in entries), None)
-            info = HaDevice(
-                name=device.name_by_user or device.name,
-                manufacturer=device.manufacturer,
-                model=device.model,
-                domain=domain,
-            )
-            for mac in macs:
-                result.setdefault(mac, info)
+            for device in dr.async_entries_for_config_entry(registry, entry.entry_id):
+                macs = [norm_mac(v) for t, v in device.connections if t == dr.CONNECTION_NETWORK_MAC]
+                macs = [m for m in macs if m]
+                if not macs:
+                    continue
+                info = HaDevice(
+                    name=device.name_by_user or device.name,
+                    manufacturer=device.manufacturer,
+                    model=device.model,
+                    domain=entry.domain,
+                )
+                for mac in macs:
+                    result.setdefault(mac, info)
         return result
 
     def _identities(self, data: CirrusData, ha: dict[str, HaDevice]) -> dict[str, dict]:

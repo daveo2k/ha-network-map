@@ -11,10 +11,10 @@
     "panel_custom",
     "websocket_api"
   ],
-  "documentation": "https://github.com/daveo2k/home-network-cirrus-plugin",
+  "documentation": "https://github.com/daveo2k/ha-network-map",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/daveo2k/home-network-cirrus-plugin/issues",
+  "issue_tracker": "https://github.com/daveo2k/ha-network-map/issues",
   "requirements": [
     "asyncssh>=2.14.0"
   ],

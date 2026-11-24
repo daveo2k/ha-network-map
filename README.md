@@ -168,7 +168,7 @@ reloads the integration. To move to a new Home Assistant, add the integration wi
 
 ## Installation
 
-1. HACS → Integrations → ⋮ → *Custom repositories* → add `https://github.com/daveo2k/home-network-cirrus-plugin` (category *Integration*), install, restart HA.
+1. HACS → Integrations → ⋮ → *Custom repositories* → add `https://github.com/daveo2k/ha-network-map` (category *Integration*), install, restart HA.
    Or copy `custom_components/ovcirrus` into `/config/custom_components/` and restart.
 2. Settings → Devices & services → *Add integration* → **OmniVista Cirrus**.
 3. Choose your instance (default `uk.manage.ovcirrus.com`) and enter an **Application ID and secret**. Create these in Cirrus under your user profile → *Applications*. The application only sees the organizations its user can see.
