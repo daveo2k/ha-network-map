@@ -67,8 +67,8 @@ text_size: 11             # pt size of device names (8-30); other map labels sca
 layout_editing: admin     # who can drag devices and save the layout: admin (default), true or false
 snap_to_grid: true        # snap dragged devices to a grid (viewers can toggle it in edit mode)
 grid_size: 20             # grid spacing in px
-device_size: 0.5          # starting size of gateways, switches, APs and wired devices (0.5-2); viewers can change it
-client_size: 0.25         # starting size of wireless and wired clients (0.25-2); viewers can change it
+device_size: 1            # starting size of gateways, switches, APs and wired devices, relative to the default (0.5-4); viewers can change it
+client_size: 1            # starting size of wireless and wired clients, relative to the default (0.5-4); viewers can change it
 show_vlans: true          # VLAN legend above the map
 link_graphs: false        # small traffic trend on the gateway's link labels (UniFi); viewers can toggle it
 rate_ranges: [30m, 2h, 24h]  # bandwidth chart range buttons: 15m 30m 1h 2h 6h 12h 24h 3d 7d
@@ -76,7 +76,7 @@ rate_range: 2h            # range the bandwidth chart opens on
 rate_unit: bits           # bits (b/s, Mb/s) or bytes (B/s, MB/s) for live rates and graphs
 ```
 
-Click a node for details, use **+ / −** on a node to expand or collapse it, and the zoom buttons (or **fit**) to size the map. **View** opens the size settings: **Text** (map names and labels only), **Clients** (0.75× to 2.5×) and **Devices** (1× to 3×: rings, photos, the AP client-count bubble and brand logos). Changes are remembered in each browser. Admins can **Save as default for all devices**, which stores the sizes in Home Assistant so every browser and the app start with them. **Reset** returns to the saved default.
+Click a node for details, use **+ / −** on a node to expand or collapse it, and the zoom buttons (or **fit**) to size the map. **View** opens the size settings: **Text** (map names and labels only), **Clients** and **Devices** (rings, photos, the AP client-count bubble and brand logos), each from 0.5× to 4× where 1× is the default size. Changes are remembered in each browser. Admins can **Save as default for all devices**, which stores the sizes in Home Assistant so every browser and the app start with them. **Reset** returns to the saved default.
 
 **Edit layout** (admins) lets you drag switches, APs, gateways, wired and manual devices. Everything under a device moves with it, so an AP's wireless clients stay with their AP. Links, labels and boxes follow. Positions are saved in Home Assistant and shared by every dashboard. **Snap to grid** (on by default) aligns devices to a dot grid shown while editing; hold **Alt** while dragging to place a device freely. **Reset layout** returns to the automatic layout. The choice is remembered per browser, and boxes resize to fit.
 

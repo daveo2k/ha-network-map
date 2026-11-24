@@ -99,14 +99,17 @@ function bottomOf(out, start) {
 }
 const BIG_KINDS = new Set(["gateway", "switch", "ap", "bridge", "endpoint", "manual"]);
 let DEVICE_SCALE = SIZE_BASE;
-const DS_MIN = 0.5, DS_MAX = 2, DS_STEP = 0.25, DS_KEY = "ovcirrus-device-size", DS_OLD_KEY = "ovcirrus-device-scale";
+const DS_MIN = 0.25, DS_MAX = 2, DS_STEP = 0.125, DS_KEY = "ovcirrus-device-size", DS_OLD_KEY = "ovcirrus-device-scale";
 const CLIENT_KINDS = new Set(["wireless", "wired"]);
 const UNP_KINDS = new Set(["wireless", "wired", "manual", "endpoint"]); // nodes UPAM can put in a UNP
 let CLIENT_SCALE = SIZE_BASE;
-const CS_MIN = 0.25, CS_MAX = 2, CS_STEP = 0.25, CS_KEY = "ovcirrus-client-size", CS_OLD_KEY = "ovcirrus-client-scale";
-const clampSize = (v, lo, hi) => (Number(v) ? Math.min(hi, Math.max(lo, Math.round(Number(v) * 4) / 4)) : null);
+const CS_MIN = 0.25, CS_MAX = 2, CS_STEP = 0.125, CS_KEY = "ovcirrus-client-size", CS_OLD_KEY = "ovcirrus-client-scale";
+const clampSize = (v, lo, hi) => (Number(v) ? Math.min(hi, Math.max(lo, Math.round(Number(v) * 8) / 8)) : null);
 // size in the new units from a new value, else from an old raw multiplier
-const DS_DEFAULT = 0.5, CS_DEFAULT = 0.25;
+// Sizes are stored as multipliers of the original size; the View menu shows them relative to these defaults
+// (so the default reads 1x and steps are a quarter of it).
+const DS_DEFAULT = 0.5, CS_DEFAULT = 0.5;
+const relSize = (v, def) => `${+((v || def) / def).toFixed(2)}×`;
 const sizeFrom = (v, old, lo, hi) => clampSize(v, lo, hi) || (Number(old) ? clampSize(Number(old) / SIZE_BASE, lo, hi) : null);
 const ringSize = (n) =>
   BIG_KINDS.has(n.kind) ? Math.round(42 * DEVICE_SCALE) : CLIENT_KINDS.has(n.kind) ? Math.round(42 * CLIENT_SCALE) : 42;
@@ -628,11 +631,16 @@ class OvCirrusNetworkMap extends HTMLElement {
   }
 
   _cfgDevice() {
-    return sizeFrom(this._config?.device_size, this._config?.device_scale, DS_MIN, DS_MAX) || DS_DEFAULT;
+    // device_size in the card config is relative to the default (1 = default)
+    const rel = Number(this._config?.device_size);
+    if (rel) return clampSize(rel * DS_DEFAULT, DS_MIN, DS_MAX);
+    return sizeFrom(null, this._config?.device_scale, DS_MIN, DS_MAX) || DS_DEFAULT;
   }
 
   _cfgClient() {
-    return sizeFrom(this._config?.client_size, this._config?.client_scale, CS_MIN, CS_MAX) || CS_DEFAULT;
+    const rel = Number(this._config?.client_size);
+    if (rel) return clampSize(rel * CS_DEFAULT, CS_MIN, CS_MAX);
+    return sizeFrom(null, this._config?.client_scale, CS_MIN, CS_MAX) || CS_DEFAULT;
   }
 
   static getStubConfig() {
@@ -1281,8 +1289,8 @@ class OvCirrusNetworkMap extends HTMLElement {
         n.groups.forEach((g) => g.children.forEach(walk));
       };
       walk(root);
-      DEVICE_SCALE = SIZE_BASE * (this._ds || 1);
-      CLIENT_SCALE = SIZE_BASE * (this._cs || 1);
+      DEVICE_SCALE = SIZE_BASE * (this._ds || DS_DEFAULT);
+      CLIENT_SCALE = SIZE_BASE * (this._cs || CS_DEFAULT);
       for (const n of this._index.values()) {
         n._ch = chipH(n);
         n._cw = this._chipWidth(n);
@@ -2016,8 +2024,8 @@ class OvCirrusNetworkMap extends HTMLElement {
     const saved = viewText(sv) || svCs || svDs;
     return `<div class="viewmenu" role="dialog" aria-label="Map view">
       ${row("Text", "font", `${this._tp || TEXT_DEFAULT}pt`, "size of device names; other map labels follow")}
-      ${row("Clients", "csize", `${this._cs || 1}×`, "wireless and wired clients")}
-      ${row("Devices", "dsize", `${this._ds || 1}×`, "switches, APs, gateway, client counts")}
+      ${row("Clients", "csize", relSize(this._cs, CS_DEFAULT), "wireless and wired clients")}
+      ${row("Devices", "dsize", relSize(this._ds, DS_DEFAULT), "switches, APs, gateway, client counts")}
       ${this._hasUnifi() ? `<div class="vsec">Bandwidth graphs</div>
       <div class="vrow vstack"><span class="vlab">Range buttons<small>which time ranges the gateway chart offers${
         rangesAvailable().length < RANGE_DEFS.length ? "; longer ones need a longer history in the integration options" : ""
@@ -2035,7 +2043,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       <div class="vfoot">
         ${this._isAdmin ? `<button class="act" data-viewsave title="Every browser and device starts with these sizes">Save as default for all devices</button>` : ""}
         <button class="act ghost" data-viewreset>${saved ? "Use saved default" : "Reset"}</button>
-        <div class="muted">${this._viewSaved ? "Saved as the default for all devices." : "Changes are remembered in this browser."}${saved ? ` Saved default: text ${viewText(sv) || TEXT_DEFAULT}pt, clients ${svCs || 1}×, devices ${svDs || 1}×.` : ""}</div>
+        <div class="muted">${this._viewSaved ? "Saved as the default for all devices." : "Changes are remembered in this browser."}${saved ? ` Saved default: text ${viewText(sv) || TEXT_DEFAULT}pt, clients ${relSize(svCs, CS_DEFAULT)}, devices ${relSize(svDs, DS_DEFAULT)}.` : ""}</div>
       </div>${this._isAdmin ? this._myPortsBlock() : ""}${this._isAdmin ? `
       <div class="vfoot backup">
         <div class="vlab">Backup &amp; restore<small>settings, manual devices, names, layout and your device images; never your Cirrus or UniFi credentials</small></div>
@@ -2399,7 +2407,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       this._local = { font: false, client: false, device: false };
     };
     root.querySelector("[data-viewsave]")?.addEventListener("click", async () => {
-      const view = { text: this._tp || TEXT_DEFAULT, clients: this._cs || 1, devices: this._ds || 1 };
+      const view = { text: this._tp || TEXT_DEFAULT, clients: this._cs || CS_DEFAULT, devices: this._ds || DS_DEFAULT };
       try {
         await this._hass.callWS({ type: "ovcirrus/save_view", entry_id: entryId, ...view });
         forgetLocal(); // this browser now follows the saved default too
@@ -2512,7 +2520,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     root.querySelectorAll("[data-csize]").forEach((b) =>
       b.addEventListener("click", () => {
         const step = b.dataset.csize === "+" ? CS_STEP : -CS_STEP;
-        this._cs = clampSize((this._cs || 1) + step, CS_MIN, CS_MAX);
+        this._cs = clampSize((this._cs || CS_DEFAULT) + step, CS_MIN, CS_MAX);
         this._local = { ...this._local, client: true };
         this._viewSaved = false;
         try {
@@ -2527,7 +2535,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     root.querySelectorAll("[data-dsize]").forEach((b) =>
       b.addEventListener("click", () => {
         const step = b.dataset.dsize === "+" ? DS_STEP : -DS_STEP;
-        this._ds = clampSize((this._ds || 1) + step, DS_MIN, DS_MAX);
+        this._ds = clampSize((this._ds || DS_DEFAULT) + step, DS_MIN, DS_MAX);
         this._local = { ...this._local, device: true };
         this._viewSaved = false;
         try {
