@@ -113,6 +113,34 @@ class CirrusClient:
                 raise CirrusApiError(f"{path}: {err}") from err
         raise CirrusApiError(f"{path}: retry exhausted")
 
+    async def _put(self, path: str, body: dict) -> Any:
+        """PUT a change. A 403 means the application's user may not make it (CirrusForbiddenError), never reauth
+        in a loop: one retry after a fresh token, as for reads."""
+        if not self._token or time.monotonic() > self._token_expiry:
+            await self.authenticate()
+        for attempt in (1, 2):
+            try:
+                async with self._session.put(
+                    f"{self._base}{path}", json=body, headers=self._headers, timeout=TIMEOUT
+                ) as resp:
+                    data = await _read_json(resp)
+                    if resp.status == 401 and attempt == 1:
+                        await self.authenticate()
+                        continue
+                    if resp.status == 403:
+                        raise CirrusForbiddenError(f"{path}: {_err_text(resp.status, data)}")
+                    if resp.status not in (200, 201, 204):
+                        raise CirrusApiError(f"{path}: {_err_text(resp.status, data)}")
+                    return data.get("data") if isinstance(data, dict) else data
+            except aiohttp.ClientError as err:
+                raise CirrusApiError(f"{path}: {err}") from err
+        raise CirrusApiError(f"{path}: retry exhausted")
+
+    async def acknowledge_alerts(self, org_id: str, ids: list[str]) -> None:
+        """Acknowledge alerts in Cirrus by id (the same as Acknowledge in the Cirrus Alerts page)."""
+        for i in range(0, len(ids), 100):
+            await self._put(f"/ov/v1/organizations/{org_id}/alerts/acknowledge", {"ids": ids[i : i + 100]})
+
     async def get_organizations(self) -> list[dict]:
         return await self._get("/ov/v1/organizations") or []
 

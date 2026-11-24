@@ -788,6 +788,31 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                     node["is_new"] = True
             site_map["summary"]["new_devices"] = len(self.store.recent_new())
 
+    async def async_acknowledge_alerts(
+        self, ids: list[str] | None = None, alert_type: str | None = None, client_mac: str | None = None
+    ) -> int:
+        """Acknowledge unacknowledged alerts in Cirrus: the given ids, or every one matching the filters
+        (all of them when nothing is given). Returns how many were acknowledged."""
+        if not self.data:
+            return 0
+        wanted = set(ids or [])
+        mac = norm_mac(client_mac) if client_mac else None
+        targets = [
+            a
+            for a in self.data.alerts
+            if not a["acknowledged"]
+            and (not wanted or a["id"] in wanted)
+            and (not alert_type or (a.get("type") or "").lower() == alert_type.lower())
+            and (not mac or a.get("client_mac") == mac)
+        ]
+        if not targets:
+            return 0
+        await self.client.acknowledge_alerts(self.org_id, [a["id"] for a in targets])
+        for a in targets:
+            a["acknowledged"] = True
+        self.async_set_updated_data(self.data)
+        return len(targets)
+
     def rebuild(self) -> None:
         """Re-render maps from cached data (after an override, scan result or new asset)."""
         if not self.data:

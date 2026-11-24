@@ -1696,6 +1696,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     const sevBtn = (k, label, n) =>
       `<button class="vchip sev ${esc(k)}${this._alertSev === k ? " on" : ""}" data-sev="${esc(k)}"><i></i>${esc(label)}<span>${n}</span></button>`;
     const sevs = [...SEVS.filter((k) => counts[k]), ...Object.keys(counts).filter((k) => !SEVS.includes(k))];
+    const canAck = this._isAdmin && !this._ackBusy;
     const macCell = (mac) => {
       if (!mac) return "";
       const n = this._macOnMap(mac);
@@ -1703,22 +1704,43 @@ class OvCirrusNetworkMap extends HTMLElement {
     };
     return `<div class="listbar">${sevBtn("all", "All", shown.length)}${sevs.map((k) => sevBtn(k, k[0].toUpperCase() + k.slice(1), counts[k])).join("")}
         <input type="search" class="filter" data-filter="alerts" placeholder="Filter alerts" value="${esc(this._alertFilter || "")}">
-        <label class="check"><input type="checkbox" data-acked ${this._showAcked ? "checked" : ""}> Show acknowledged</label></div>
+        <label class="check"><input type="checkbox" data-acked ${this._showAcked ? "checked" : ""}> Show acknowledged</label>
+        ${canAck && rows.some((a) => !a.acknowledged) ? `<button class="act" data-ackshown title="Acknowledge every unacknowledged alert in this list, here and in Cirrus">Acknowledge shown</button>` : ""}
+        ${this._ackBusy ? `<span class="muted">Acknowledging…</span>` : ""}${this._ackError ? `<span class="ackerr">${esc(this._ackError)}</span>` : ""}</div>
       ${
         rows.length
-          ? `<table class="iptable alerts"><colgroup><col style="width:110px"><col style="width:100px"><col><col style="width:22%"><col style="width:18%"></colgroup><thead><tr><th>When</th><th>Severity</th><th>Alert</th><th>Device</th><th>Client</th></tr></thead><tbody>${rows
+          ? `<table class="iptable alerts"><colgroup><col style="width:110px"><col style="width:100px"><col><col style="width:22%"><col style="width:18%">${this._isAdmin ? `<col style="width:44px">` : ""}</colgroup><thead><tr><th>When</th><th>Severity</th><th>Alert</th><th>Device</th><th>Client</th>${this._isAdmin ? "<th></th>" : ""}</tr></thead><tbody>${rows
               .map((a) => {
                 const q = [a.type, a.reason, a.device, a.client_mac, a.ssid, a.site].filter(Boolean).join(" ").toLowerCase();
                 const when = a.time ? new Date(a.time * 1000).toLocaleString() : "";
-                return `<tr class="${a.acknowledged ? "acked" : ""}" data-q="${esc(q)}"><td title="${esc(when)}">${esc(ago(a.time))}</td>
+                return `<tr class="${a.acknowledged ? "acked" : ""}" data-q="${esc(q)}" data-alert="${esc(a.id)}" data-open="${a.acknowledged ? "" : "1"}"><td title="${esc(when)}">${esc(ago(a.time))}</td>
                   <td><span class="pill sev ${esc(a.severity || "")}">${esc(a.severity || "–")}</span></td>
                   <td><b>${esc(a.type || "Alert")}</b>${a.reason ? `<div class="muted">${esc(a.reason)}</div>` : ""}</td>
                   <td>${a.device_mac && this._macOnMap(a.device_mac) ? macCell(a.device_mac) : esc(a.device || "")}${a.ssid ? `<div class="muted">${esc(a.ssid)}</div>` : ""}</td>
-                  <td>${macCell(a.client_mac)}</td></tr>`;
+                  <td>${macCell(a.client_mac)}</td>${
+                    this._isAdmin
+                      ? `<td>${a.acknowledged ? `<ha-icon class="ackd" icon="mdi:check" title="Acknowledged"></ha-icon>` : `<button class="ackbtn" data-ack="${esc(a.id)}" ${canAck ? "" : "disabled"} title="Acknowledge (also in Cirrus)"><ha-icon icon="mdi:check"></ha-icon></button>`}</td>`
+                      : ""
+                  }</tr>`;
               })
               .join("")}</tbody></table>`
           : `<div class="empty">${all.length ? "No alerts match." : "No alerts from Cirrus for this site."}</div>`
       }`;
+  }
+
+  async _ackAlerts(ids) {
+    const site = this._sites?.[this._siteIdx];
+    if (!site || !ids.length || this._ackBusy) return;
+    this._ackBusy = true;
+    this._ackError = null;
+    this._render();
+    try {
+      await this._hass.callWS({ type: "ovcirrus/ack_alerts", entry_id: site.entry_id, ids });
+    } catch (err) {
+      this._ackError = `Not acknowledged: ${err?.message || err}`;
+    }
+    this._ackBusy = false;
+    await this._fetch();
   }
 
   _applyListFilter(kind) {
@@ -2470,6 +2492,15 @@ class OvCirrusNetworkMap extends HTMLElement {
       this._showAcked = ev.target.checked;
       this._render();
     });
+    root.querySelectorAll("[data-ack]").forEach((b) =>
+      b.addEventListener("click", () => this._ackAlerts([b.dataset.ack]))
+    );
+    root.querySelector("[data-ackshown]")?.addEventListener("click", () => {
+      const ids = [...root.querySelectorAll(".listview tr[data-alert][data-open='1']")]
+        .filter((tr) => !tr.hidden)
+        .map((tr) => tr.dataset.alert);
+      if (ids.length && confirm(`Acknowledge ${ids.length} alert${ids.length > 1 ? "s" : ""} in Cirrus?`)) this._ackAlerts(ids);
+    });
     root.querySelectorAll("[data-sev]").forEach((b) =>
       b.addEventListener("click", () => {
         this._alertSev = b.dataset.sev;
@@ -2618,6 +2649,13 @@ const STYLE = `
     background:var(--card-background-color); border-bottom:1px solid var(--divider-color); }
   .listbar .filter { font:inherit; font-size:13px; min-width:220px; padding:5px 8px; border-radius:6px; border:1px solid var(--divider-color);
     background:var(--card-background-color); color:var(--primary-text-color); }
+  .listbar .act { margin-top:0; }
+  .listbar .ackerr { color:var(--error-color, #db4437); font-size:12px; }
+  .listview .ackbtn { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; padding:0; border-radius:6px;
+    border:1px solid var(--divider-color); background:none; color:var(--secondary-text-color); cursor:pointer; --mdc-icon-size:18px; }
+  .listview .ackbtn:hover:not([disabled]) { color:var(--primary-color); border-color:var(--primary-color); }
+  .listview .ackbtn[disabled] { opacity:.4; cursor:default; }
+  .listview .ackd { color:var(--secondary-text-color); --mdc-icon-size:16px; }
   .listbar .muted, .listview .muted { color:var(--secondary-text-color); font-size:12px; }
   .check { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer; }
   .net { border-bottom:1px solid var(--divider-color); }

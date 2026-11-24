@@ -13,12 +13,13 @@ from homeassistant.components import frontend, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 
-from .api import CirrusClient
+from .api import CirrusClient, CirrusError, CirrusForbiddenError
 from .assets import AssetCache
 from .backup import BackupError, async_build_backup, async_restore_backup
 from homeassistant.components import panel_custom
@@ -120,7 +121,48 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_rates)
     websocket_api.async_register_command(hass, ws_set_photo)
     websocket_api.async_register_command(hass, ws_restore)
+    websocket_api.async_register_command(hass, ws_ack_alerts)
+    _register_services(hass)
     return True
+
+
+ACK_SCHEMA = vol.Schema(
+    {
+        vol.Optional("config_entry_id"): str,
+        vol.Optional("ids"): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional("alert_type"): cv.string,
+        vol.Optional("client_mac"): cv.string,
+    }
+)
+
+
+def _register_services(hass: HomeAssistant) -> None:
+    async def _ack(call: ServiceCall) -> dict:
+        entries = [
+            e
+            for e in hass.config_entries.async_entries(DOMAIN)
+            if e.state is ConfigEntryState.LOADED
+            and (not call.data.get("config_entry_id") or e.entry_id == call.data["config_entry_id"])
+        ]
+        if not entries:
+            raise ServiceValidationError("No loaded OmniVista Cirrus entry matches")
+        total = 0
+        for entry in entries:
+            try:
+                total += await entry.runtime_data.async_acknowledge_alerts(
+                    call.data.get("ids"), call.data.get("alert_type"), call.data.get("client_mac")
+                )
+            except CirrusForbiddenError as err:
+                raise HomeAssistantError(
+                    f"The Cirrus application's user may not acknowledge alerts: {err}"
+                ) from err
+            except CirrusError as err:
+                raise HomeAssistantError(f"Cirrus did not acknowledge the alerts: {err}") from err
+        return {"acknowledged": total}
+
+    hass.services.async_register(
+        DOMAIN, "acknowledge_alerts", _ack, schema=ACK_SCHEMA, supports_response=SupportsResponse.OPTIONAL
+    )
 
 
 def _scan_images(builtin: Path, user: Path) -> dict[str, str]:
@@ -247,7 +289,9 @@ def ws_topology(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
                 "sites": list(coordinator.data.maps.values()),
                 "port_names": dict(coordinator.store.port_labels.get("*", {})),
                 "ipam": coordinator.data.ipam,
-                "alerts": coordinator.data.alerts[:200],
+                # Every unacknowledged alert (so counts are right) plus the newest acknowledged ones.
+                "alerts": [a for a in coordinator.data.alerts if not a["acknowledged"]]
+                + [a for a in coordinator.data.alerts if a["acknowledged"]][:200],
                 "alerts_error": coordinator.data.alerts_error,
             }
         )
@@ -574,6 +618,35 @@ async def ws_restore(hass: HomeAssistant, connection: websocket_api.ActiveConnec
         return
     _LOGGER.info("ovcirrus: restored backup into %s: %s", entry.title, result["summary"])
     connection.send_result(msg["id"], result)
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ovcirrus/ack_alerts",
+        vol.Required("entry_id"): str,
+        vol.Required("ids"): [str],
+    }
+)
+@websocket_api.async_response
+async def ws_ack_alerts(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Acknowledge alerts in Cirrus from the card."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    if not msg["ids"]:
+        connection.send_result(msg["id"], {"acknowledged": 0})
+        return
+    try:
+        n = await coordinator.async_acknowledge_alerts(msg["ids"])
+    except CirrusForbiddenError as err:
+        connection.send_error(msg["id"], "forbidden", f"The Cirrus application's user may not acknowledge alerts ({err})")
+        return
+    except CirrusError as err:
+        connection.send_error(msg["id"], "cirrus_error", str(err))
+        return
+    connection.send_result(msg["id"], {"acknowledged": n})
 
 
 @websocket_api.websocket_command(

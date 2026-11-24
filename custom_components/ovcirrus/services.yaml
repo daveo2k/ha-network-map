@@ -1,0 +1,18 @@
+acknowledge_alerts:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: ovcirrus
+    ids:
+      selector:
+        text:
+          multiple: true
+    alert_type:
+      example: MAC Auth Failure
+      selector:
+        text:
+    client_mac:
+      example: "60:74:F4:EA:F6:8E"
+      selector:
+        text:

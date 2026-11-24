@@ -253,5 +253,29 @@
         "server": "Specific DNS server(s)"
       }
     }
+  },
+  "services": {
+    "acknowledge_alerts": {
+      "name": "Acknowledge alerts",
+      "description": "Acknowledges unacknowledged OmniVista Cirrus alerts, in Cirrus as well as here. With no ids or filters, every unacknowledged alert is acknowledged.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Cirrus entry",
+          "description": "Only this OmniVista Cirrus entry. Leave empty for all."
+        },
+        "ids": {
+          "name": "Alert ids",
+          "description": "Acknowledge only these alerts (the id is in the ovcirrus_alert event)."
+        },
+        "alert_type": {
+          "name": "Alert type",
+          "description": "Acknowledge only alerts of this type, for example MAC Auth Failure."
+        },
+        "client_mac": {
+          "name": "Client MAC",
+          "description": "Acknowledge only alerts about this client."
+        }
+      }
+    }
   }
 }

@@ -108,7 +108,16 @@ automation:
           message: "{{ trigger.event.data.reason or '' }} ({{ trigger.event.data.device or 'unknown device' }})"
 ```
 
-UNPs and alerts need the Cirrus application's user to have read access to UPAM and alerts. Without it, the integration keeps working and the card says what is missing.
+Admins can acknowledge alerts from the Alerts tab, one at a time or every alert the current filter shows. This acknowledges them in Cirrus too. Automations can do the same with the `ovcirrus.acknowledge_alerts` action: pass `ids` (the `id` from the event), or `alert_type` and/or `client_mac`, or nothing to acknowledge every unacknowledged alert:
+
+```yaml
+action: ovcirrus.acknowledge_alerts
+data:
+  alert_type: MAC Auth Failure
+  client_mac: "60:74:F4:EA:F6:8E"
+```
+
+UNPs and alerts need the Cirrus application's user to have read access to UPAM and alerts; acknowledging needs write access to alerts. Without it, the integration keeps working and the card says what is missing.
 
 ## Device identification
 
