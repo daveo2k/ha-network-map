@@ -28,6 +28,10 @@ class CirrusApiError(CirrusError):
     """Request failed."""
 
 
+class CirrusForbiddenError(CirrusApiError):
+    """The application's user may not read this (e.g. no UPAM rights). Not a login problem."""
+
+
 class CirrusClient:
     """Minimal OmniVista Cirrus API client."""
 
@@ -82,7 +86,9 @@ class CirrusClient:
             # Refresh an hour early (tokens last ~15 days).
             self._token_expiry = time.monotonic() + int(body.get("expires_in", 3600)) - 3600
 
-    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def _get(self, path: str, params: dict[str, Any] | None = None, optional: bool = False) -> Any:
+        """GET one resource. With optional=True a 403 raises CirrusForbiddenError instead of an auth failure,
+        so a feature the account cannot read is skipped without failing the whole integration."""
         if not self._token or time.monotonic() > self._token_expiry:
             await self.authenticate()
         query = _encode_params(params or {})
@@ -92,6 +98,8 @@ class CirrusClient:
                     f"{self._base}{path}", params=query, headers=self._headers, timeout=TIMEOUT
                 ) as resp:
                     body = await _read_json(resp)
+                    if resp.status == 403 and optional:
+                        raise CirrusForbiddenError(f"{path}: {_err_text(resp.status, body)}")
                     if resp.status in (401, 403) and attempt == 1:
                         await self.authenticate()
                         continue
@@ -201,6 +209,36 @@ class CirrusClient:
             if len(page) < PAGE_SIZE or offset > 20000:
                 return clients
             offset += PAGE_SIZE
+
+    # ---- Unified access (UPAM / UNP). Read-only; these need an account that can see UPAM.
+    async def get_access_role_profiles(self, org_id: str) -> list[dict]:
+        """Access Role Profiles (UNPs), with their policy list and per-assignment VLAN mapping."""
+        return await self._get(f"/ov/v1/organizations/{org_id}/network-configuration/arps", optional=True) or []
+
+    async def get_auth_sessions(self, org_id: str) -> list[dict]:
+        """Current UPAM authentication sessions: MAC, final Access Role Profile, VLAN, policy, NAS."""
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            page = await self._get(
+                f"/ov/v1/organizations/{org_id}/am/access-records/authentication-online-records",
+                {"limit": PAGE_SIZE, "offset": offset},
+                optional=True,
+            ) or {}
+            batch = (page.get("list") or []) if isinstance(page, dict) else (page if isinstance(page, list) else [])
+            rows.extend(batch)
+            if len(batch) < PAGE_SIZE or offset > 20000:
+                return rows
+            offset += PAGE_SIZE
+
+    async def get_alerts(self, org_id: str, site_ids: list[str]) -> list[dict]:
+        """Alerts for the chosen sites (acknowledged ones included; the newest few hundred)."""
+        data = await self._get(
+            f"/ov/v1/organizations/{org_id}/alerts/details",
+            {"scope": "site", "scopeId[]": site_ids, "limit": 300, "offset": 0},
+            optional=True,
+        )
+        return data if isinstance(data, list) else (data or {}).get("list") or [] if isinstance(data, dict) else []
 
 
 def _encode_params(params: dict[str, Any]) -> list[tuple[str, str]]:

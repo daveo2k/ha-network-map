@@ -94,6 +94,14 @@ class UnifiClient:
         # full records: they carry the port table, LLDP neighbours and system stats
         return await self._get(f"/api/s/{self.site}/stat/device") or []
 
+    async def networks(self) -> list[dict]:
+        """Network configs: name, VLAN, subnet (ip_subnet), DHCP range (dhcpd_start / dhcpd_stop)."""
+        return await self._get(f"/api/s/{self.site}/rest/networkconf") or []
+
+    async def known_clients(self) -> list[dict]:
+        """Every client UniFi remembers, online or not, including fixed-IP reservations (use_fixedip / fixed_ip)."""
+        return await self._get(f"/api/s/{self.site}/rest/user") or []
+
     async def gateway_ports(self) -> list[dict]:
         """Just the gateway's port table with live rates (for the bandwidth history)."""
         g = parse_gateway([], await self.devices())

@@ -28,6 +28,7 @@ class EntryStore:
         self.view: dict[str, float] = {}  # saved map sizes for every browser: font, client, device
         self.photos: dict[str, dict] = {}  # MAC or manual-device id -> {"file", "v"} (your picture of it)
         self.baseline_done = False
+        self.alerts_seen: list[str] | None = None  # Cirrus alert ids already announced (None: never read)
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
@@ -40,6 +41,7 @@ class EntryStore:
         self.view = data.get("view", {})
         self.photos = data.get("photos", {})
         self.baseline_done = data.get("baseline_done", False)
+        self.alerts_seen = data.get("alerts_seen")
 
     def _data(self) -> dict:
         return {
@@ -52,6 +54,7 @@ class EntryStore:
             "view": self.view,
             "photos": self.photos,
             "baseline_done": self.baseline_done,
+            "alerts_seen": self.alerts_seen,
         }
 
     def schedule_save(self) -> None:
@@ -59,6 +62,21 @@ class EntryStore:
 
     async def async_save(self) -> None:
         await self._store.async_save(self._data())
+
+    def observe_alerts(self, ids: list[str]) -> set[str]:
+        """Remember alert ids; return the ones not seen before. The first read only records a baseline."""
+        if not ids:
+            return set()
+        if self.alerts_seen is None:
+            self.alerts_seen = list(dict.fromkeys(ids))[:2000]
+            self.schedule_save()
+            return set()
+        known = set(self.alerts_seen)
+        fresh = [i for i in ids if i not in known]
+        if fresh:
+            self.alerts_seen = (fresh + self.alerts_seen)[:2000]
+            self.schedule_save()
+        return set(fresh)
 
     def observe(self, seen: dict[str, dict]) -> list[dict]:
         """Record currently-connected devices; return the ones never seen before.

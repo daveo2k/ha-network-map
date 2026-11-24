@@ -219,6 +219,12 @@
       "new_devices": {
         "name": "New devices (24h)"
       },
+      "active_alerts": {
+        "name": "Active alerts"
+      },
+      "pool_usage": {
+        "name": "{network} DHCP pool usage"
+      },
       "wan_download": {
         "name": "WAN download"
       },

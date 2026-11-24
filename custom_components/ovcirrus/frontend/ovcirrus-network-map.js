@@ -44,6 +44,8 @@ function applyFontScale(fs) {
   LABEL_ROW = Math.round(BASE.LABEL_ROW * Math.max(0.85, fs));
 }
 const ZOOM_KEY = "ovcirrus-zoom";
+const TAB_KEY = "ovcirrus-tab";
+const IP_COLS = `<colgroup><col style="width:130px"><col style="width:110px"><col style="width:22%"><col style="width:160px"><col style="width:13%"><col></colgroup>`;
 const BUNDLE_STEP = 16; // spacing between parallel link lines
 const BAND_GAP = 2 * 22 + 1; // space between frequency-band sections in a client box (gap, dotted line, gap)
 const bandLabel = (b) => (b ? String(b).replace(/\s*ghz$/i, " GHz").replace(/^(\d)ghz/i, "$1 GHz") : "Other");
@@ -59,6 +61,7 @@ const BIG_KINDS = new Set(["gateway", "switch", "ap", "bridge", "endpoint", "man
 let DEVICE_SCALE = SIZE_BASE;
 const DS_MIN = 0.5, DS_MAX = 2, DS_STEP = 0.25, DS_KEY = "ovcirrus-device-size", DS_OLD_KEY = "ovcirrus-device-scale";
 const CLIENT_KINDS = new Set(["wireless", "wired"]);
+const UNP_KINDS = new Set(["wireless", "wired", "manual", "endpoint"]); // nodes UPAM can put in a UNP
 let CLIENT_SCALE = SIZE_BASE;
 const CS_MIN = 0.25, CS_MAX = 2, CS_STEP = 0.25, CS_KEY = "ovcirrus-client-size", CS_OLD_KEY = "ovcirrus-client-scale";
 const clampSize = (v, lo, hi) => (Number(v) ? Math.min(hi, Math.max(lo, Math.round(Number(v) * 4) / 4)) : null);
@@ -508,6 +511,18 @@ class OvCirrusNetworkMap extends HTMLElement {
     }
     this._selected = null;
     this._siteIdx = 0;
+    this._tab = "map"; // map | ip | alerts
+    try {
+      const t = localStorage.getItem(TAB_KEY);
+      if (["map", "ip", "alerts"].includes(t)) this._tab = t;
+    } catch (e) {
+      // storage blocked: start on the map
+    }
+    this._unp = null; // highlighted UNP (Access Role Profile)
+    this._netClosed = new Set(); // collapsed networks in the address view
+    this._showFree = false;
+    this._alertSev = "all";
+    this._showAcked = false;
   }
 
   setConfig(config) {
@@ -746,7 +761,11 @@ class OvCirrusNetworkMap extends HTMLElement {
       const msg = { type: "ovcirrus/topology" };
       if (this._config.entry_id) msg.entry_id = this._config.entry_id;
       const res = await this._hass.callWS(msg);
-      this._sites = (res.entries || []).flatMap((e) => e.sites.map((s) => ({ ...s, entry: e.title, entry_id: s.entry_id || e.entry_id, port_names: e.port_names || {} })));
+      this._sites = (res.entries || []).flatMap((e) => e.sites.map((s) => ({
+        ...s, entry: e.title, entry_id: s.entry_id || e.entry_id, port_names: e.port_names || {},
+        ipam: e.ipam || {}, alerts_error: e.alerts_error || null,
+        alerts: (e.alerts || []).filter((a) => !a.site_id || !s.site_id || a.site_id === s.site_id),
+      })));
       this._isAdmin = !!res.is_admin;
       this._integrationVersion = res.version || null;
       this._applyServerView(res.view || {});
@@ -1262,7 +1281,8 @@ class OvCirrusNetworkMap extends HTMLElement {
             (this._editLayout && DRAGGABLE.has(n.kind) ? " draggable" : "") +
             (this._drag?.id === n.id && this._drag.moved ? " dragging" : "") +
             (this._selected === n.id ? " selected" : "") +
-            (sv !== null && n.vlan ? (String(n.vlan) === String(sv) ? " vmatch" : " dim") : "");
+            (sv !== null && n.vlan ? (String(n.vlan) === String(sv) ? " vmatch" : " dim") : "") +
+            (this._unp != null && UNP_KINDS.has(n.kind) ? (n.unp === this._unp ? " vmatch" : " dim") : "");
           const big = BIG_KINDS.has(n.kind) ? " big" : "";
           const square = n.graphic?.type === "switch" ? " square" : ""; // rounded-square icon (switches)
           const client = CLIENT_KINDS.has(n.kind) ? " client" : "";
@@ -1454,9 +1474,10 @@ class OvCirrusNetworkMap extends HTMLElement {
       <ha-card>
         <div class="header">
           ${cfg.title === false ? "" : `<div class="title">${esc(cfg.title || "Network map")}</div>`}${siteSel}
+          ${site ? this._tabsHtml(site) : ""}
           <div class="stats">${stats}</div>
           ${
-            this._canEditLayout()
+            this._canEditLayout() && this._tab === "map"
               ? `<div class="layout">${
                   this._editLayout
                     ? `<span class="hint">Drag devices to arrange the map${this._snap ? " (hold Alt to place freely)" : ""}</span><button data-layout="add" title="Add a server or other wired device to the map">+ Add device</button><button data-layout="snap" class="${this._snap ? "on" : ""}" aria-pressed="${this._snap}" title="Snap devices to a ${this._grid}px grid">Snap to grid</button><button data-layout="reset" title="Put every device back where it was drawn automatically">Reset layout</button><button data-layout="done" class="on">Done</button>`
@@ -1465,10 +1486,10 @@ class OvCirrusNetworkMap extends HTMLElement {
               : ""
           }<div class="zoom">
             <span class="viewwrap"><button class="viewbtn${this._viewOpen ? " on" : ""}" data-viewmenu aria-haspopup="true" aria-expanded="${!!this._viewOpen}" title="Text, client and device size"><ha-icon icon="mdi:tune-variant"></ha-icon>View</button>${this._viewOpen ? this._viewMenu() : ""}</span>
-            <span class="grp" title="Zoom"><ha-icon icon="mdi:magnify"></ha-icon><button data-zoom="-" title="Zoom out" aria-label="Zoom out">−</button><button data-zoom="fit" title="Fit to width">fit</button><button data-zoom="+" title="Zoom in" aria-label="Zoom in">+</button></span>
+            ${this._tab === "map" ? "" : "<!--"}<span class="grp" title="Zoom"><ha-icon icon="mdi:magnify"></ha-icon><button data-zoom="-" title="Zoom out" aria-label="Zoom out">−</button><button data-zoom="fit" title="Fit to width">fit</button><button data-zoom="+" title="Zoom in" aria-label="Zoom in">+</button></span>${this._tab === "map" ? "" : "-->"}
           </div>
         </div>${warn}${
-          site && Object.keys(site.vlans || {}).length && cfg.show_vlans !== false
+          this._tab === "map" && site && Object.keys(site.vlans || {}).length && cfg.show_vlans !== false
             ? `<div class="vlans"><span class="vlabel">VLANs</span>${Object.entries(site.vlans)
                 .map(
                   ([id, v]) =>
@@ -1476,9 +1497,13 @@ class OvCirrusNetworkMap extends HTMLElement {
                 )
                 .join("")}${this._vlan != null ? `<button class="vchip clear" data-vlan="">Clear</button>` : ""}</div>`
             : ""
-        }
-        <div class="viewport" style="${cfg.height === "fill" ? "" : `height:${cfg.height}px`}">${this._error && !site ? `<div class="empty">${esc(this._error)}</div>` : body}</div>
-        ${this._form ? formBlock : panel}
+        }${this._tab === "map" && site ? this._unpRow(site) : ""}
+        <div class="viewport${this._tab === "map" ? "" : " listview"}" style="${cfg.height === "fill" ? "" : `height:${cfg.height}px`}">${
+          this._error && !site ? `<div class="empty">${esc(this._error)}</div>`
+          : this._tab === "ip" ? this._ipamView(site)
+          : this._tab === "alerts" ? this._alertsView(site)
+          : body}</div>
+        ${this._form ? formBlock : this._tab === "map" ? panel : ""}
       </ha-card>`;
 
     const vp = this.shadowRoot.querySelector(".viewport");
@@ -1517,6 +1542,182 @@ class OvCirrusNetworkMap extends HTMLElement {
     const menu = this.shadowRoot.querySelector(".viewmenu");
     if (menu && menuScroll) menu.scrollTop = menuScroll;
     this._bind();
+  }
+
+  // ---------- tabs: map, addresses (IPAM), alerts ----------
+  _tabsHtml(site) {
+    const active = (site.alerts || []).filter((a) => !a.acknowledged);
+    const worst = active.reduce((m, a) => Math.min(m, a.rank ?? 5), 9);
+    const conflicts = (site.ipam?.networks || []).reduce((n, x) => n + (x.conflicts || 0), 0);
+    const tab = (id, icon, label, extra = "") =>
+      `<button class="tab${this._tab === id ? " on" : ""}" data-tab="${id}" aria-pressed="${this._tab === id}"><ha-icon icon="${icon}"></ha-icon>${label}${extra}</button>`;
+    return `<div class="tabs" role="group" aria-label="View">${tab("map", "mdi:graph-outline", "Map")}${tab(
+      "ip", "mdi:ip-network-outline", "Addresses",
+      conflicts ? `<span class="count bad" title="${conflicts} address conflict${conflicts > 1 ? "s" : ""}">${conflicts}</span>` : ""
+    )}${tab(
+      "alerts", "mdi:alert-outline", "Alerts",
+      active.length ? `<span class="count${worst <= 1 ? " bad" : worst <= 3 ? " warnc" : ""}">${active.length}</span>` : ""
+    )}</div>`;
+  }
+
+  _unpRow(site) {
+    const unps = site.unps || [];
+    if (!unps.length) {
+      return site.access_error
+        ? `<div class="vlans unps"><span class="vlabel">UNPs</span><span class="muted" title="Give the Cirrus application's user read access to UPAM to see which UNP each client is in">${esc(site.access_error)}</span></div>`
+        : "";
+    }
+    if (this._unp != null && !unps.some((u) => u.name === this._unp)) this._unp = null;
+    return `<div class="vlans unps"><span class="vlabel">UNPs</span>${unps
+      .map((u) => {
+        const vl = [...new Set([...(u.vlans || []), ...(u.seen_vlans || [])])];
+        const tip = [u.name, u.policy_list ? `Policy list: ${u.policy_list}` : "", vl.length ? `VLAN ${vl.join(", ")}` : "",
+          `${u.clients} client${u.clients === 1 ? "" : "s"} now`, u.status && u.status !== "SUCCESSFUL" ? `Config: ${u.status}` : ""].filter(Boolean).join("\n");
+        const c = vl.length ? vlanColor(vl[0]) : "var(--secondary-text-color)";
+        return `<button class="vchip${this._unp === u.name ? " on" : ""}${u.clients ? "" : " down"}" data-unp="${esc(u.name)}" style="--c:${c}" title="${esc(tip)}"><i></i>${esc(u.name)}<span>${u.clients}</span></button>`;
+      })
+      .join("")}${this._unp != null ? `<button class="vchip clear" data-unp="">Clear</button>` : ""}</div>`;
+  }
+
+  _macOnMap(mac) {
+    if (!mac || !this._index) return null;
+    const m = String(mac).toUpperCase();
+    for (const n of this._index.values()) if (n.mac && String(n.mac).toUpperCase() === m) return n;
+    return null;
+  }
+
+  _goto(mac) {
+    const node = this._macOnMap(mac);
+    if (!node) return;
+    // Open every box on the way down so the device is drawn.
+    const site = this._sites?.[this._siteIdx];
+    const path = [];
+    const find = (n) => {
+      if (n.id === node.id) return true;
+      for (const g of n.groups || []) for (const c of g.children || []) if (find(c)) { path.push(n.id); return true; }
+      return false;
+    };
+    if (site) find(site.root);
+    path.forEach((id) => this._collapsed.set(id, false));
+    this._setTab("map");
+    this._selected = node.id;
+    this._render();
+    this.shadowRoot.querySelector(`.node[data-id="${CSS.escape(node.id)}"]`)?.scrollIntoView({ block: "center", inline: "center" });
+  }
+
+  _setTab(tab) {
+    this._tab = tab;
+    try {
+      localStorage.setItem(TAB_KEY, tab);
+    } catch (e) {
+      // storage blocked: not remembered
+    }
+  }
+
+  _ipamView(site) {
+    const ipam = site?.ipam || {};
+    const nets = ipam.networks || [];
+    if (!nets.length) {
+      return `<div class="empty">No address data yet. Connect the UniFi gateway (integration <b>Configure</b> → <b>UniFi gateway</b>) for subnets, DHCP pools and reservations; switch IP interfaces from Cirrus are used for VLANs the gateway does not serve.</div>`;
+    }
+    const toInt = (ip) => ip.split(".").reduce((a, o) => a * 256 + Number(o), 0);
+    const toIp = (n) => [n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join(".");
+    const STATE = { gateway: "Gateway", reserved: "Reserved", dhcp: "DHCP", static: "Static", free: "Free" };
+    const row = (a) => {
+      const onMap = this._macOnMap(a.mac);
+      const name = a.name || (a.state === "free" ? "" : "–");
+      const q = [a.ip, a.name, a.mac, a.reserved_for].filter(Boolean).join(" ").toLowerCase();
+      return `<tr class="st-${a.state}${a.conflict ? " conflict" : ""}" data-q="${esc(q)}">
+        <td class="mono">${esc(a.ip)}</td>
+        <td><span class="pill ${a.state}">${STATE[a.state] || esc(a.state)}</span>${!["free", "gateway"].includes(a.state) ? `<i class="on ${a.online ? "yes" : "no"}" title="${a.online ? "Online now" : "Not seen online now"}"></i>` : ""}</td>
+        <td>${onMap ? `<a href="#" data-goto="${esc(a.mac)}" title="Show on the map">${esc(name)}</a>` : esc(name)}</td>
+        <td class="mono">${esc(a.mac || "")}${a.reserved_for && a.reserved_for !== a.mac ? `<div class="muted">reserved for ${esc(a.reserved_for)}</div>` : ""}</td>
+        <td class="muted">${esc((a.sources || []).join(", "))}</td>
+        <td>${a.conflict ? `<span class="bad">⚠ ${esc(a.conflict)}</span>` : a.note ? `<span class="muted">${esc(a.note)}</span>` : a.in_pool && a.state === "free" ? `<span class="muted">in DHCP pool</span>` : ""}</td></tr>`;
+    };
+    const section = (n) => {
+      let rows = n.addresses || [];
+      if (this._showFree && n.enumerable) {
+        const used = new Map(rows.map((a) => [a.ip, a]));
+        const [base] = n.cidr.split("/");
+        const bits = Number(n.cidr.split("/")[1]);
+        const first = toInt(base) + (bits < 31 ? 1 : 0);
+        const last = toInt(base) + 2 ** (32 - bits) - (bits < 31 ? 2 : 1);
+        const p0 = n.pool ? toInt(n.pool[0]) : null, p1 = n.pool ? toInt(n.pool[1]) : null;
+        rows = [];
+        for (let i = first; i <= last; i++) {
+          const ip = toIp(i);
+          rows.push(used.get(ip) || { ip, state: "free", in_pool: p0 !== null && i >= p0 && i <= p1, sources: [] });
+        }
+      }
+      const closed = this._netClosed.has(n.id);
+      const pct = n.pool_pct ?? null;
+      const bar = n.pool_size
+        ? `<span class="usage" title="${n.pool_used} of ${n.pool_size} pool addresses in use or reserved"><span style="width:${Math.min(100, pct || 0)}%" class="${pct >= 90 ? "bad" : pct >= 75 ? "warnc" : ""}"></span></span><b>${pct}%</b> of pool (${n.pool_free} free)`
+        : n.dhcp ? "DHCP" : `<span class="muted">${n.source === "Cirrus" ? "from switch interface, no DHCP pool known" : "no DHCP"}</span>`;
+      return `<section class="net${closed ? " closed" : ""}">
+        <button class="nethead" data-net="${esc(n.id)}" aria-expanded="${!closed}">
+          <ha-icon icon="${closed ? "mdi:chevron-right" : "mdi:chevron-down"}"></ha-icon>
+          ${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span>` : ""}
+          <b>${esc(n.name)}</b><span class="mono">${esc(n.cidr)}</span>
+          ${n.pool ? `<span class="muted mono">pool ${esc(n.pool[0])} – ${esc(n.pool[1])}</span>` : ""}
+          <span class="netstats">${bar}<span>${n.in_use} online</span><span>${n.reserved} reserved</span>${n.conflicts ? `<span class="bad">⚠ ${n.conflicts} conflict${n.conflicts > 1 ? "s" : ""}</span>` : ""}</span>
+        </button>
+        ${closed ? "" : `<table class="iptable">${IP_COLS}<thead><tr><th>Address</th><th>State</th><th>Name</th><th>MAC</th><th>Seen by</th><th></th></tr></thead><tbody>${rows.map(row).join("")}</tbody></table>`}
+      </section>`;
+    };
+    const other = ipam.other || [];
+    return `<div class="listbar"><input type="search" class="filter" data-filter="ip" placeholder="Filter by address, name or MAC" value="${esc(this._ipFilter || "")}">
+        <label class="check"><input type="checkbox" data-showfree ${this._showFree ? "checked" : ""}> Show free addresses</label>
+        <span class="muted">Read-only. Subnets and pools from ${nets.some((n) => n.source === "UniFi") ? "the UniFi gateway" : "Cirrus"}; addresses from every source the map uses.</span></div>
+      ${nets.map(section).join("")}${
+        other.length
+          ? `<section class="net"><div class="nethead static"><b>Other private addresses</b><span class="muted">not in any known subnet</span></div><table class="iptable">${IP_COLS}<tbody>${other.map(row).join("")}</tbody></table></section>`
+          : ""
+      }`;
+  }
+
+  _alertsView(site) {
+    if (site?.alerts_error) return `<div class="empty">${esc(site.alerts_error)}. Give it read access to alerts in Cirrus to see them here.</div>`;
+    const all = site?.alerts || [];
+    const SEVS = ["critical", "major", "minor", "warning", "info"];
+    const shown = all.filter((a) => this._showAcked || !a.acknowledged);
+    const counts = {};
+    shown.forEach((a) => (counts[a.severity || "other"] = (counts[a.severity || "other"] || 0) + 1));
+    const rows = shown.filter((a) => this._alertSev === "all" || (a.severity || "other") === this._alertSev);
+    const sevBtn = (k, label, n) =>
+      `<button class="vchip sev ${esc(k)}${this._alertSev === k ? " on" : ""}" data-sev="${esc(k)}"><i></i>${esc(label)}<span>${n}</span></button>`;
+    const sevs = [...SEVS.filter((k) => counts[k]), ...Object.keys(counts).filter((k) => !SEVS.includes(k))];
+    const macCell = (mac) => {
+      if (!mac) return "";
+      const n = this._macOnMap(mac);
+      return n ? `<a href="#" data-goto="${esc(mac)}" title="Show on the map">${esc(n.name)}</a>` : `<span class="mono">${esc(mac)}</span>`;
+    };
+    return `<div class="listbar">${sevBtn("all", "All", shown.length)}${sevs.map((k) => sevBtn(k, k[0].toUpperCase() + k.slice(1), counts[k])).join("")}
+        <input type="search" class="filter" data-filter="alerts" placeholder="Filter alerts" value="${esc(this._alertFilter || "")}">
+        <label class="check"><input type="checkbox" data-acked ${this._showAcked ? "checked" : ""}> Show acknowledged</label></div>
+      ${
+        rows.length
+          ? `<table class="iptable alerts"><colgroup><col style="width:110px"><col style="width:100px"><col><col style="width:22%"><col style="width:18%"></colgroup><thead><tr><th>When</th><th>Severity</th><th>Alert</th><th>Device</th><th>Client</th></tr></thead><tbody>${rows
+              .map((a) => {
+                const q = [a.type, a.reason, a.device, a.client_mac, a.ssid, a.site].filter(Boolean).join(" ").toLowerCase();
+                const when = a.time ? new Date(a.time * 1000).toLocaleString() : "";
+                return `<tr class="${a.acknowledged ? "acked" : ""}" data-q="${esc(q)}"><td title="${esc(when)}">${esc(ago(a.time))}</td>
+                  <td><span class="pill sev ${esc(a.severity || "")}">${esc(a.severity || "–")}</span></td>
+                  <td><b>${esc(a.type || "Alert")}</b>${a.reason ? `<div class="muted">${esc(a.reason)}</div>` : ""}</td>
+                  <td>${a.device_mac && this._macOnMap(a.device_mac) ? macCell(a.device_mac) : esc(a.device || "")}${a.ssid ? `<div class="muted">${esc(a.ssid)}</div>` : ""}</td>
+                  <td>${macCell(a.client_mac)}</td></tr>`;
+              })
+              .join("")}</tbody></table>`
+          : `<div class="empty">${all.length ? "No alerts match." : "No alerts from Cirrus for this site."}</div>`
+      }`;
+  }
+
+  _applyListFilter(kind) {
+    const q = ((kind === "ip" ? this._ipFilter : this._alertFilter) || "").trim().toLowerCase();
+    this.shadowRoot.querySelectorAll(".listview tr[data-q]").forEach((tr) => {
+      tr.hidden = !!q && !q.split(/\s+/).every((w) => tr.dataset.q.includes(w));
+    });
   }
 
   _applyServerView(view) {
@@ -2221,6 +2422,56 @@ class OvCirrusNetworkMap extends HTMLElement {
         this._render();
       })
     );
+    root.querySelectorAll("[data-tab]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._setTab(b.dataset.tab);
+        this._viewOpen = false;
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-unp]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const name = b.dataset.unp;
+        this._unp = !name || this._unp === name ? null : name;
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-net]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const id = b.dataset.net;
+        if (this._netClosed.has(id)) this._netClosed.delete(id);
+        else this._netClosed.add(id);
+        this._render();
+      })
+    );
+    root.querySelectorAll("[data-goto]").forEach((a) =>
+      a.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        this._goto(a.dataset.goto);
+      })
+    );
+    root.querySelector("[data-showfree]")?.addEventListener("change", (ev) => {
+      this._showFree = ev.target.checked;
+      this._render();
+    });
+    root.querySelector("[data-acked]")?.addEventListener("change", (ev) => {
+      this._showAcked = ev.target.checked;
+      this._render();
+    });
+    root.querySelectorAll("[data-sev]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._alertSev = b.dataset.sev;
+        this._render();
+      })
+    );
+    root.querySelectorAll("input[data-filter]").forEach((inp) =>
+      inp.addEventListener("input", () => {
+        if (inp.dataset.filter === "ip") this._ipFilter = inp.value;
+        else this._alertFilter = inp.value;
+        this._applyListFilter(inp.dataset.filter);
+      })
+    );
+    if (this._tab !== "map") this._applyListFilter(this._tab);
     root.querySelector("select.site")?.addEventListener("change", (ev) => {
       this._siteIdx = Number(ev.target.value);
       this._selected = null;
@@ -2338,6 +2589,58 @@ const STYLE = `
   .vchip.on { border-color:var(--c); box-shadow:0 0 0 1px var(--c) inset; }
   .vchip.down { opacity:.55; }
   .vchip.clear { padding:3px 10px; }
+  .vchip.static { cursor:default; }
+  .unps .muted { font-size:12px; color:var(--secondary-text-color); }
+  .tabs { display:inline-flex; gap:2px; padding:2px; border:1px solid var(--divider-color); border-radius:8px; }
+  .tab { display:inline-flex; align-items:center; gap:4px; font:inherit; font-size:12.5px; padding:3px 9px; border-radius:6px; border:0;
+    background:transparent; color:var(--secondary-text-color); cursor:pointer; }
+  .tab ha-icon { --mdc-icon-size:16px; }
+  .tab.on { background:color-mix(in srgb, var(--primary-color) 14%, transparent); color:var(--primary-text-color); font-weight:600; }
+  .tab:focus-visible { outline:2px solid var(--primary-color); outline-offset:1px; }
+  .count { min-width:16px; padding:0 5px; border-radius:8px; font-size:11px; line-height:16px; text-align:center;
+    background:var(--secondary-background-color, #eee); color:var(--primary-text-color); font-variant-numeric:tabular-nums; }
+  .count.bad { background:var(--error-color, #db4437); color:#fff; }
+  .count.warnc { background:var(--warning-color, #ffa600); color:#000; }
+  .viewport.listview { overflow:auto; padding:0 0 16px; }
+  .listbar { position:sticky; top:0; z-index:2; display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 16px;
+    background:var(--card-background-color); border-bottom:1px solid var(--divider-color); }
+  .listbar .filter { font:inherit; font-size:13px; min-width:220px; padding:5px 8px; border-radius:6px; border:1px solid var(--divider-color);
+    background:var(--card-background-color); color:var(--primary-text-color); }
+  .listbar .muted, .listview .muted { color:var(--secondary-text-color); font-size:12px; }
+  .check { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer; }
+  .net { border-bottom:1px solid var(--divider-color); }
+  .nethead { display:flex; flex-wrap:wrap; align-items:center; gap:8px; width:100%; padding:10px 16px; font:inherit; font-size:13.5px;
+    text-align:left; border:0; background:transparent; color:var(--primary-text-color); cursor:pointer; }
+  .nethead.static { cursor:default; }
+  .nethead ha-icon { --mdc-icon-size:18px; color:var(--secondary-text-color); }
+  .netstats { display:inline-flex; flex-wrap:wrap; align-items:center; gap:10px; margin-left:auto; font-size:12.5px; }
+  .usage { display:inline-block; width:90px; height:7px; border-radius:4px; background:var(--secondary-background-color, #eee); overflow:hidden; }
+  .usage span { display:block; height:100%; background:var(--primary-color); }
+  .usage span.warnc { background:var(--warning-color, #ffa600); } .usage span.bad { background:var(--error-color, #db4437); }
+  .mono { font-family:var(--code-font-family, ui-monospace, monospace); font-size:12.5px; }
+  .iptable { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
+  .iptable td { overflow-wrap:anywhere; } .iptable td.mono { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .iptable th { text-align:left; font-weight:600; font-size:11.5px; color:var(--secondary-text-color); padding:4px 8px;
+    border-bottom:1px solid var(--divider-color); }
+  .iptable th:first-child, .iptable td:first-child { padding-left:16px; }
+  .iptable td { padding:5px 8px; border-bottom:1px solid color-mix(in srgb, var(--divider-color) 50%, transparent); vertical-align:top; }
+  .iptable tr.st-free td { color:var(--secondary-text-color); }
+  .iptable tr.conflict td { background:color-mix(in srgb, var(--error-color, #db4437) 8%, transparent); }
+  .iptable tr.acked td { opacity:.6; }
+  .iptable a { color:var(--primary-color); text-decoration:none; } .iptable a:hover { text-decoration:underline; }
+  .pill { display:inline-block; font-size:11px; line-height:17px; padding:0 7px; border-radius:9px; border:1px solid var(--divider-color);
+    text-transform:capitalize; white-space:nowrap; }
+  .pill.reserved { border-color:var(--primary-color); color:var(--primary-color); }
+  .pill.dhcp { border-color:#30a46c; color:#30a46c; }
+  .pill.gateway { border-color:#8e4ec6; color:#8e4ec6; }
+  .pill.free { border-style:dashed; color:var(--secondary-text-color); }
+  .pill.sev.critical, .pill.sev.major { background:var(--error-color, #db4437); border-color:transparent; color:#fff; }
+  .pill.sev.minor, .pill.sev.warning { background:var(--warning-color, #ffa600); border-color:transparent; color:#000; }
+  .vchip.sev.critical, .vchip.sev.major { --c:var(--error-color, #db4437); } .vchip.sev.minor, .vchip.sev.warning { --c:var(--warning-color, #ffa600); }
+  .vchip.sev.all, .vchip.sev.info { --c:var(--secondary-text-color); }
+  i.on { display:inline-block; width:7px; height:7px; border-radius:50%; margin-left:6px; vertical-align:middle; }
+  i.on.yes { background:#30a46c; } i.on.no { background:var(--disabled-text-color, #bbb); }
+  .bad { color:var(--error-color, #db4437); }
   .vchip:focus-visible { outline:2px solid var(--primary-color); outline-offset:2px; }
   .port.invlan .jack { stroke:var(--c); stroke-width:1.8; }
   .group { position:absolute; border-radius:12px; background:var(--card-background-color);

@@ -35,6 +35,7 @@ from .const import (
     CARD_URL,
     CONF_APP_ID,
     CONF_APP_SECRET,
+    CONF_UNIFI_PASSWORD,
     CONF_HOST,
     DOMAIN,
     IMAGES_URL,
@@ -132,6 +133,18 @@ def _scan_images(builtin: Path, user: Path) -> dict[str, str]:
             if file.suffix.lower() in (".png", ".webp", ".jpg", ".jpeg", ".svg"):
                 images[model_slug(file.stem)] = f"{base}/{file.name}"
     return images
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: CirrusConfigEntry) -> bool:
+    """1.1 -> 1.2: move the UniFi password from the options (visible to tools) into the entry data."""
+    if entry.version > 1:
+        return False
+    if entry.minor_version < 2:
+        data, options = dict(entry.data), dict(entry.options)
+        if CONF_UNIFI_PASSWORD in options:
+            data[CONF_UNIFI_PASSWORD] = options.pop(CONF_UNIFI_PASSWORD)
+        hass.config_entries.async_update_entry(entry, data=data, options=options, minor_version=2)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: CirrusConfigEntry) -> bool:
@@ -233,6 +246,9 @@ def ws_topology(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
                 "updated": coordinator.last_update_success,
                 "sites": list(coordinator.data.maps.values()),
                 "port_names": dict(coordinator.store.port_labels.get("*", {})),
+                "ipam": coordinator.data.ipam,
+                "alerts": coordinator.data.alerts[:200],
+                "alerts_error": coordinator.data.alerts_error,
             }
         )
     connection.send_result(

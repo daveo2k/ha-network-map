@@ -143,6 +143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddE
         entities.append(SiteClientsSensor(coordinator, site_id, "wireless"))
         entities.append(SiteClientsSensor(coordinator, site_id, "wired"))
     entities.append(NewDevicesSensor(coordinator))
+    entities.append(AlertsSensor(coordinator))
     if coordinator.unifi:
         entities.extend(WanSensor(coordinator, desc) for desc in WAN_SENSORS)
     async_add_entities(entities)
@@ -187,6 +188,22 @@ async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities: AddE
 
     _add_radios()
     entry.async_on_unload(coordinator.async_add_listener(_add_radios))
+
+    known_pools: set[str] = set()
+
+    @callback
+    def _add_pools() -> None:
+        # One usage sensor per network with a DHCP pool; networks added later get one too.
+        new = []
+        for net in (coordinator.data.ipam or {}).get("networks") or []:
+            if net.get("pool_size") and net["id"] not in known_pools:
+                known_pools.add(net["id"])
+                new.append(PoolUsageSensor(coordinator, net["id"], net.get("name") or net["cidr"]))
+        if new:
+            async_add_entities(new)
+
+    _add_pools()
+    entry.async_on_unload(coordinator.async_add_listener(_add_pools))
 
 
 class CirrusDeviceSensor(CirrusDeviceEntity, SensorEntity):
@@ -294,6 +311,100 @@ class NewDevicesSensor(CoordinatorEntity[CirrusCoordinator], SensorEntity):
                 }
                 for d in self.coordinator.store.recent_new()[:50]
             ]
+        }
+
+
+def entry_device_info(coordinator: CirrusCoordinator) -> DeviceInfo:
+    entry = coordinator.config_entry
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"entry_{entry.entry_id}")},
+        name=f"Cirrus {entry.title}",
+        manufacturer="Alcatel-Lucent Enterprise",
+        model="OmniVista Cirrus organization",
+        entry_type=DeviceEntryType.SERVICE,
+    )
+
+
+class AlertsSensor(CoordinatorEntity[CirrusCoordinator], SensorEntity):
+    """Unacknowledged Cirrus alerts (attributes list the newest)."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "active_alerts"
+    _attr_icon = "mdi:alert-outline"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: CirrusCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_active_alerts"
+        self._attr_device_info = entry_device_info(coordinator)
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.coordinator.data.alerts_error
+
+    @property
+    def native_value(self) -> int:
+        return sum(1 for a in self.coordinator.data.alerts if not a["acknowledged"])
+
+    @property
+    def extra_state_attributes(self):
+        active = [a for a in self.coordinator.data.alerts if not a["acknowledged"]]
+        by_sev = Counter(a.get("severity") or "unknown" for a in active)
+        return {
+            "by_severity": dict(by_sev),
+            "alerts": [
+                {
+                    "severity": a.get("severity"),
+                    "type": a.get("type"),
+                    "reason": a.get("reason"),
+                    "device": a.get("device"),
+                    "client_mac": a.get("client_mac"),
+                    "time": datetime.fromtimestamp(a["time"], timezone.utc).isoformat() if a.get("time") else None,
+                }
+                for a in active[:20]
+            ],
+        }
+
+
+class PoolUsageSensor(CoordinatorEntity[CirrusCoordinator], SensorEntity):
+    """How full one network's DHCP pool is: addresses in the pool that are in use or reserved."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "pool_usage"
+    _attr_icon = "mdi:ip-network"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(self, coordinator: CirrusCoordinator, net_id: str, name: str) -> None:
+        super().__init__(coordinator)
+        self._net_id = net_id
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_pool_{net_id}"
+        self._attr_translation_placeholders = {"network": name}
+        self._attr_device_info = (
+            unifi_device_info(coordinator) if coordinator.unifi else entry_device_info(coordinator)
+        )
+
+    def _net(self) -> dict | None:
+        return next(
+            (n for n in (self.coordinator.data.ipam or {}).get("networks") or [] if n["id"] == self._net_id), None
+        )
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self._net())
+
+    @property
+    def native_value(self):
+        net = self._net()
+        return net.get("pool_pct") if net else None
+
+    @property
+    def extra_state_attributes(self):
+        net = self._net() or {}
+        return {
+            k: net.get(k)
+            for k in ("cidr", "vlan", "pool", "pool_size", "pool_used", "pool_free", "reserved", "in_use", "conflicts")
         }
 
 

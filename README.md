@@ -80,6 +80,36 @@ Click a node for details, use **+ / −** on a node to expand or collapse it, an
 
 **Edit layout** (admins) lets you drag switches, APs, gateways, wired and manual devices. Everything under a device moves with it, so an AP's wireless clients stay with their AP. Links, labels and boxes follow. Positions are saved in Home Assistant and shared by every dashboard. **Snap to grid** (on by default) aligns devices to a dot grid shown while editing; hold **Alt** while dragging to place a device freely. **Reset layout** returns to the automatic layout. The choice is remembered per browser, and boxes resize to fit.
 
+### Addresses, UNPs and alerts
+
+The card has three tabs: **Map**, **Addresses** and **Alerts**. All three are read-only.
+
+**Addresses** lists every subnet with its DHCP pool, how full the pool is, and one row per address that is reserved or in use: *Gateway*, *Reserved* (a UniFi fixed-IP reservation), *DHCP* (inside the pool) or *Static* (outside it). Each row shows the device, its MAC and which sources saw it (UniFi, Cirrus, UPAM, switch ARP, manual devices). **Show free addresses** fills in the gaps. Conflicts are highlighted: one address used by two devices, or a reserved address in use by a different device. Click a name to find the device on the map.
+
+Subnets, pools and reservations come from the UniFi gateway; for routed VLANs the gateway does not serve, the switches' IP interfaces in Cirrus are used. Each network with a DHCP pool gets a *DHCP pool usage* sensor (percent, with free / used / reserved counts as attributes).
+
+**UNPs:** if the Cirrus application's user can read UPAM, the map shows a **UNPs** row (Access Role Profiles) next to the VLANs. Click one to highlight the clients UPAM put in it. A client's details show its access role, the VLAN it was given, the policy list, access policy and how it authenticated.
+
+**Alerts** shows Cirrus alerts for the site, newest first, filtered by severity or text, with acknowledged ones hidden unless you ask for them. The *Active alerts* sensor counts the unacknowledged ones, and each new one fires an `ovcirrus_alert` event (`id`, `severity`, `type`, `reason`, `device`, `device_mac`, `client_mac`, `ssid`, `site`, `time`):
+
+```yaml
+automation:
+  - alias: Notify on Cirrus alert
+    triggers:
+      - trigger: event
+        event_type: ovcirrus_alert
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.event.data.severity in ['critical', 'major'] }}"
+    actions:
+      - action: notify.mobile_app_phone
+        data:
+          title: "Network: {{ trigger.event.data.type }}"
+          message: "{{ trigger.event.data.reason or '' }} ({{ trigger.event.data.device or 'unknown device' }})"
+```
+
+UNPs and alerts need the Cirrus application's user to have read access to UPAM and alerts. Without it, the integration keeps working and the card says what is missing.
+
 ## Device identification
 
 Every client, including ones the integration has never seen before, is identified live from:

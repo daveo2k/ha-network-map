@@ -17,7 +17,8 @@ from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import CirrusApiError, CirrusAuthError, CirrusClient
+from .access import add_seen_vlans, parse_alerts, parse_sessions, parse_unps
+from .api import CirrusApiError, CirrusAuthError, CirrusClient, CirrusError, CirrusForbiddenError
 from .assets import AssetCache
 from .history import RateHistory
 from .const import (
@@ -57,6 +58,7 @@ from .const import (
     DEFAULT_SSH_INTERVAL,
     DEFAULT_SSH_PORT,
     DOMAIN,
+    EVENT_ALERT,
     EVENT_NEW_CLIENT,
     TOPOLOGY_INTERVAL,
 )
@@ -65,6 +67,7 @@ from homeassistant.helpers import issue_registry as ir
 from .discovery import discover, full_scan
 from .dns import ReverseResolver, parse_servers
 from .identify import HaDevice, identify, is_private_mac
+from .ipam import Reservation, Sighting, build_ipam, merge_networks, parse_cirrus_interfaces, parse_unifi_networks
 from .mac_table import SshError, SwitchTables, fetch_switch_tables, norm_mac
 from .store import EntryStore
 from .topology import MapExtras, build_site_map, model_slug, walk_nodes
@@ -93,6 +96,15 @@ class CirrusData:
     ssh_errors: dict[str, str] = field(default_factory=dict)
     unifi: dict = field(default_factory=dict)  # {"wan": {...}, "clients": {mac: {...}}}
     unifi_error: str | None = None
+    unifi_networks: list = field(default_factory=list)  # UniFi networkconf rows
+    unifi_known: list = field(default_factory=list)  # UniFi rest/user rows (incl. fixed-IP reservations)
+    ip_interfaces: list = field(default_factory=list)  # switch IP interfaces from Cirrus
+    unps: dict[str, dict] = field(default_factory=dict)  # Access Role Profile name -> summary
+    sessions: dict[str, dict] = field(default_factory=dict)  # MAC -> UPAM online session
+    access_error: str | None = None  # why UNP data is missing (e.g. no UPAM rights)
+    alerts: list = field(default_factory=list)  # Cirrus alerts, newest first
+    alerts_error: str | None = None
+    ipam: dict = field(default_factory=dict)  # see ipam.build_ipam
     maps: dict[str, dict] = field(default_factory=dict)  # site_id -> card tree
 
 
@@ -161,6 +173,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         self.org_id: str = entry.data[CONF_ORG_ID]
         self._topology_at = 0.0
         self._ssh_at = 0.0
+        self._unifi_cfg_at = 0.0
         self._cache = CirrusData()
         self._scanning: set[str] = set()
         opts = entry.options
@@ -172,7 +185,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             UnifiClient(
                 opts.get(CONF_UNIFI_HOST, ""),
                 opts.get(CONF_UNIFI_USERNAME, ""),
-                opts.get(CONF_UNIFI_PASSWORD, ""),
+                entry.data.get(CONF_UNIFI_PASSWORD) or opts.get(CONF_UNIFI_PASSWORD, ""),
                 opts.get(CONF_UNIFI_SITE, "default"),
                 bool(opts.get(CONF_UNIFI_VERIFY_SSL, False)),
             )
@@ -304,6 +317,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         else:
             data.topology, data.lldp, data.ports = prev.topology, prev.lldp, prev.ports
             data.port_vlans, data.vlans = prev.port_vlans, prev.vlans
+            data.ip_interfaces, data.unps = prev.ip_interfaces, {k: dict(v) for k, v in prev.unps.items()}
 
         for topo in data.topology.values():
             for node in topo.get("nodes") or []:
@@ -313,14 +327,17 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                     data.node_status[mac] = {"on": "online", "off": "offline"}.get(reach, "unknown")
 
         await self._update_radios(data, prev)
+        await self._update_access(data, prev)
         await self._update_ssh(data, prev, now)
-        await self._update_unifi(data, prev)
+        await self._update_unifi(data, prev, now)
         if self.resolver:
             data.dns_names = await self._resolve_names(data)
 
         self.assets.ensure_oui()
         data.maps = self._build_maps(data)
+        data.ipam = self._build_ipam(data)
         self._observe(data)
+        self._alert_events(data)
         self._schedule_discovery(data)
         self._cache = data
         return data
@@ -360,6 +377,41 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             data.lldp[serial] = prev.lldp.get(serial, []) if isinstance(res, Exception) else res
         for serial, res in zip(switches, port_results):
             data.ports[serial] = prev.ports.get(serial, []) if isinstance(res, Exception) else res
+        try:
+            data.ip_interfaces = await self.client.get_ip_interfaces(self.org_id, list(data.sites))
+        except CirrusError as err:  # optional extra: never a reason to ask for new credentials
+            _LOGGER.debug("IP interfaces failed: %s", err)
+            data.ip_interfaces = prev.ip_interfaces
+        try:
+            data.unps = parse_unps(await self.client.get_access_role_profiles(self.org_id))
+        except CirrusError as err:  # optional: needs UPAM rights
+            _LOGGER.debug("Access Role Profiles failed: %s", err)
+            data.unps = {k: {**v, "clients": 0, "seen_vlans": []} for k, v in prev.unps.items()}
+
+    async def _update_access(self, data: CirrusData, prev: CirrusData) -> None:
+        """UPAM sessions (which UNP each client is in) and alerts. Optional: needs the rights to read them."""
+        for u in data.unps.values():
+            u["clients"], u["seen_vlans"] = 0, []
+        sessions, alerts = await asyncio.gather(
+            self.client.get_auth_sessions(self.org_id),
+            self.client.get_alerts(self.org_id, list(data.sites)),
+            return_exceptions=True,
+        )
+        if isinstance(sessions, CirrusForbiddenError):
+            data.access_error = "The Cirrus application's user may not read UPAM authentication records"
+        elif isinstance(sessions, Exception):
+            _LOGGER.debug("UPAM sessions failed: %s", sessions)
+            data.sessions, data.access_error = prev.sessions, prev.access_error
+        else:
+            data.sessions = parse_sessions(sessions)
+        add_seen_vlans(data.unps, data.sessions)
+        if isinstance(alerts, CirrusForbiddenError):
+            data.alerts_error = "The Cirrus application's user may not read alerts"
+        elif isinstance(alerts, Exception):
+            _LOGGER.debug("Alerts failed: %s", alerts)
+            data.alerts, data.alerts_error = prev.alerts, prev.alerts_error
+        else:
+            data.alerts = parse_alerts(alerts)
 
     async def _update_radios(self, data: CirrusData, prev: CirrusData) -> None:
         aps = {s: d for s, d in data.devices.items() if d.get("deviceFamily") == "AP" and d.get("macAddress")}
@@ -421,15 +473,24 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 data.switch_tables[serial] = res[1]
         self._ssh_at = now
 
-    async def _update_unifi(self, data: CirrusData, prev: CirrusData) -> None:
+    async def _update_unifi(self, data: CirrusData, prev: CirrusData, now: float) -> None:
         if not self.unifi:
             return
+        data.unifi_networks, data.unifi_known = prev.unifi_networks, prev.unifi_known
         try:
             snap = await self.unifi.snapshot()
         except UnifiError as err:
             data.unifi, data.unifi_error = prev.unifi, str(err)
             _LOGGER.warning("UniFi gateway read failed: %s", err)
             return
+        if now - self._unifi_cfg_at > TOPOLOGY_INTERVAL or not prev.unifi_networks:
+            # Networks and reservations change rarely: read them with the topology.
+            try:
+                data.unifi_networks = await self.unifi.networks()
+                data.unifi_known = await self.unifi.known_clients()
+                self._unifi_cfg_at = now
+            except UnifiError as err:
+                _LOGGER.debug("UniFi networks / known clients failed: %s", err)
         data.unifi = {
             "wan": snap["wan"],
             "gateway": snap.get("gateway"),
@@ -595,6 +656,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                     extras=extras,
                 )
                 self._apply_photos(maps[sid])
+                self._apply_access(maps[sid], data)
                 maps[sid]["ssh_errors"] = list(data.ssh_errors.values())
                 maps[sid]["positions"] = dict(self.store.positions.get(sid, {}))
                 maps[sid]["switches"] = [
@@ -607,6 +669,89 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             except Exception:  # noqa: BLE001 - never let the map break polling
                 _LOGGER.exception("Failed to build network map for site %s", sid)
         return maps
+
+    def _apply_access(self, site_map: dict, data: CirrusData) -> None:
+        """Mark each client with the UNP (Access Role Profile) UPAM gave it, and list the site's UNPs."""
+        counts: dict[str, int] = {}
+        for node in walk_nodes(site_map["root"]):
+            s = data.sessions.get(node.get("mac") or "")
+            if not s or node.get("kind") in ("internet", "gateway", "switch", "ap"):
+                continue
+            if s.get("unp"):
+                node["unp"] = s["unp"]
+                counts[s["unp"]] = counts.get(s["unp"], 0) + 1
+            rows = [
+                ("Access role (UNP)", s.get("unp")),
+                ("UNP VLAN", s.get("vlan")),
+                ("Policy list", (data.unps.get(s.get("unp") or "") or {}).get("policy_list")),
+                ("Access policy", s.get("policy")),
+                ("Authentication", s.get("auth")),
+                ("Auth user", s.get("user")),
+            ]
+            node["details"] = [*node.get("details", []), *[[k, str(v)] for k, v in rows if v not in (None, "")]]
+        site_map["unps"] = [
+            {**{k: u[k] for k in ("name", "policy_list", "vlans", "seen_vlans", "status")}, "clients": counts.get(name, 0)}
+            for name, u in sorted(data.unps.items())
+        ]
+        if data.access_error:
+            site_map["access_error"] = data.access_error
+
+    def _build_ipam(self, data: CirrusData) -> dict:
+        """Subnets, DHCP pools, reservations and every address in use (see ipam.py)."""
+        try:
+            networks = merge_networks(
+                parse_unifi_networks(data.unifi_networks), parse_cirrus_interfaces(data.ip_interfaces, data.vlans)
+            )
+        except Exception:  # noqa: BLE001 - never let IPAM break polling
+            _LOGGER.exception("Could not read the network list for the address view")
+            return {}
+        if not networks:
+            return {}
+        names: dict[str, str] = {}
+        sightings: list[Sighting] = []
+        for site_map in data.maps.values():
+            for node in walk_nodes(site_map["root"]):
+                mac = norm_mac(node.get("mac"))
+                if mac and node.get("name"):
+                    names.setdefault(mac, node["name"])
+                if node.get("kind") == "manual" and node.get("ip"):
+                    sightings.append(Sighting(node["ip"], mac, "Manual", node.get("status") != "offline", node.get("name")))
+        for dev in data.devices.values():
+            if dev.get("ipAddress"):
+                online = data.node_status.get(norm_mac(dev.get("macAddress")) or "") != "offline"
+                sightings.append(Sighting(dev["ipAddress"], dev.get("macAddress"), "Device", online, dev.get("name")))
+        for c in data.clients.values():
+            if c.get("clientIp"):
+                sightings.append(Sighting(c["clientIp"], c.get("clientMac"), "Cirrus"))
+        for mac, s in data.sessions.items():
+            if s.get("ip"):
+                sightings.append(Sighting(s["ip"], mac, "UPAM"))
+        for tables in data.switch_tables.values():
+            for mac, ip in tables.arp.items():
+                sightings.append(Sighting(ip, mac, "ARP"))
+        for c in (data.unifi.get("clients") or {}).values():
+            if c.get("ip"):
+                sightings.append(Sighting(c["ip"], c.get("mac"), "UniFi", True, c.get("name") or c.get("hostname")))
+        reservations = [
+            Reservation(u["fixed_ip"], u["mac"], u.get("name") or u.get("hostname"), u.get("network_id"))
+            for u in data.unifi_known
+            if u.get("use_fixedip") and u.get("fixed_ip") and u.get("mac")
+        ]
+        try:
+            return build_ipam(networks, sightings, reservations, names)
+        except Exception:  # noqa: BLE001 - never let IPAM break polling
+            _LOGGER.exception("Failed to build the address view")
+            return {}
+
+    def _alert_events(self, data: CirrusData) -> None:
+        """Fire ovcirrus_alert once for each new, unacknowledged Cirrus alert (none on the very first read)."""
+        fresh = self.store.observe_alerts([a["id"] for a in data.alerts])
+        for alert in data.alerts:
+            if alert["id"] in fresh and not alert["acknowledged"]:
+                self.hass.bus.async_fire(
+                    EVENT_ALERT,
+                    {"entry_id": self.config_entry.entry_id, **{k: v for k, v in alert.items() if k != "rank"}},
+                )
 
     def _observe(self, data: CirrusData) -> None:
         """New-device detection over everything placed on the maps."""
@@ -638,6 +783,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         if not self.data:
             return
         self.data.maps = self._build_maps(self.data)
+        self.data.ipam = self._build_ipam(self.data)
         self._observe(self.data)
         self.async_set_updated_data(self.data)
 

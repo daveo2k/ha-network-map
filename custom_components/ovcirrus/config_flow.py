@@ -314,6 +314,7 @@ class CirrusConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow."""
 
     VERSION = 1
+    MINOR_VERSION = 2  # 1.2: the UniFi password lives in the entry data, not the options
 
     def __init__(self) -> None:
         self._data: dict[str, Any] = {}
@@ -496,7 +497,9 @@ class CirrusOptionsFlow(OptionsFlow):
         return self.async_show_menu(step_id="init", menu_options=["general", "clients", "manual", "ssh", "dns", "unifi", "bandwidth"])
 
     def _save(self, updates: dict[str, Any]) -> ConfigFlowResult:
-        return self.async_create_entry(data={**self.config_entry.options, **updates})
+        options = {**self.config_entry.options, **updates}
+        options.pop(CONF_UNIFI_PASSWORD, None)  # kept in the entry data
+        return self.async_create_entry(data=options)
 
     async def async_step_general(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         if user_input is not None:
@@ -638,7 +641,11 @@ class CirrusOptionsFlow(OptionsFlow):
         opts = self.config_entry.options
         if user_input is not None:
             if user_input.get(CONF_UNIFI_ENABLED):
-                password = user_input.get(CONF_UNIFI_PASSWORD) or opts.get(CONF_UNIFI_PASSWORD, "")
+                password = (
+                    user_input.get(CONF_UNIFI_PASSWORD)
+                    or self.config_entry.data.get(CONF_UNIFI_PASSWORD)
+                    or opts.get(CONF_UNIFI_PASSWORD, "")
+                )
                 client = UnifiClient(
                     user_input.get(CONF_UNIFI_HOST, ""),
                     user_input.get(CONF_UNIFI_USERNAME, ""),
@@ -656,9 +663,14 @@ class CirrusOptionsFlow(OptionsFlow):
                     errors["base"] = "unifi_connect"
                 finally:
                     await client.close()
-                user_input[CONF_UNIFI_PASSWORD] = password
+                if not errors and password != self.config_entry.data.get(CONF_UNIFI_PASSWORD):
+                    # Secrets belong in the entry data: options are shown by tools and diagnostics.
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data={**self.config_entry.data, CONF_UNIFI_PASSWORD: password}
+                    )
+            user_input.pop(CONF_UNIFI_PASSWORD, None)
             if not errors:
-                return self._save(user_input)
+                return self._save({k: v for k, v in user_input.items()})
         defaults = {**opts, **(user_input or {})}
         gateway = ""
         coordinator = self.config_entry.runtime_data

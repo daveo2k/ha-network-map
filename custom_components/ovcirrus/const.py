@@ -72,6 +72,7 @@ CONF_DISCOVERY_INTERVAL = "discovery_interval_hours"
 DEFAULT_DISCOVERY_INTERVAL = 24
 
 EVENT_NEW_CLIENT = "ovcirrus_new_client"
+EVENT_ALERT = "ovcirrus_alert"
 CACHE_DIR = "ovcirrus_cache"
 CACHE_URL = "/ovcirrus_cache"
 # Your own pictures of individual clients and devices (uploaded from the map)
