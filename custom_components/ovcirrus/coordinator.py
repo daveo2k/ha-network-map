@@ -1008,7 +1008,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         if raw is None:
             raise ValueError("That alert is no longer in the list from Cirrus.")
         out: dict = {"id": str(alert_id), "fields": {}, "category": None, "definition": None,
-                     "client_history": None, "errors": {}}
+                     "client_history": None, "client_total": None, "errors": {}}
         for k, v in raw.items():
             if v in (None, "", [], {}) or isinstance(v, (dict, list)):
                 continue
@@ -1029,7 +1029,8 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         sta = raw.get("staMac")
         if sta:
             try:
-                hist = parse_alerts(await self.client.get_client_alerts(self.org_id, sta))
+                rows, out["client_total"] = await self.client.get_client_alerts(self.org_id, sta.upper())
+                hist = parse_alerts(rows)
                 out["client_history"] = [
                     {k: h.get(k) for k in ("id", "time", "severity", "type", "reason", "device", "ssid", "acknowledged")}
                     for h in hist
