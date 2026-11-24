@@ -244,6 +244,13 @@ class CirrusClient:
         """Access Role Profiles (UNPs), with their policy list and per-assignment VLAN mapping."""
         return await self._get(f"/ov/v1/organizations/{org_id}/network-configuration/arps", optional=True) or []
 
+    async def get_access_role_profile(self, org_id: str, arp_id: Any) -> dict:
+        """One Access Role Profile with its assignments. Unlike the list, each assignment here carries its
+        VLAN/tunnel mapping (vlanTunnelMapping) and the response says which group assignments SSIDs use."""
+        return await self._get(
+            f"/ov/v1/organizations/{org_id}/network-configuration/arps/id/{arp_id}", optional=True
+        ) or {}
+
     async def get_auth_sessions(self, org_id: str) -> list[dict]:
         """Current UPAM authentication sessions: MAC, final Access Role Profile, VLAN, policy, NAS."""
         rows: list[dict] = []

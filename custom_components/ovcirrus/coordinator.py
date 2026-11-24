@@ -398,10 +398,33 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             _LOGGER.debug("IP interfaces failed: %s", err)
             data.ip_interfaces = prev.ip_interfaces
         try:
-            data.unps = parse_unps(await self.client.get_access_role_profiles(self.org_id))
+            data.unps = parse_unps(await self._arps_with_assignments())
         except CirrusError as err:  # optional: needs UPAM rights
             _LOGGER.debug("Access Role Profiles failed: %s", err)
             data.unps = {k: {**v, "clients": 0, "seen_vlans": []} for k, v in prev.unps.items()}
+
+    async def _arps_with_assignments(self) -> list[dict]:
+        """The ARP list, with each ARP's assignments replaced by the detailed ones (which carry the VLAN per
+        switch / AP group). Read-only GETs; an ARP whose detail fails keeps the list's assignments."""
+        rows = await self.client.get_access_role_profiles(self.org_id)
+        ids = [r.get("id") for r in rows]
+        sem = asyncio.Semaphore(4)
+
+        async def one(arp_id):
+            if arp_id is None:
+                return None
+            async with sem:
+                return await self.client.get_access_role_profile(self.org_id, arp_id)
+
+        details = await asyncio.gather(*(one(i) for i in ids), return_exceptions=True)
+        for row, det in zip(rows, details):
+            if isinstance(det, Exception):
+                _LOGGER.debug("ARP %s detail failed: %s", row.get("id"), det)
+            elif isinstance(det, dict) and isinstance(det.get("assignments"), list):
+                row["assignments"] = det["assignments"]
+                row["inUseAssignments"] = det.get("inUseAssignments") or []
+                row["_detailed"] = True
+        return rows
 
     async def _update_access(self, data: CirrusData, prev: CirrusData) -> None:
         """UPAM sessions (which UNP each client is in) and alerts. Optional: needs the rights to read them."""
@@ -783,7 +806,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                            "source": n.get("source"), "zone_id": zid, "zone": zname.get(zid),
                            "how": "Cirrus VLAN" if by_vlan else "addresses of its online devices"})
             vl = sorted(vl)
-            out.append({**{k: u.get(k) for k in ("name", "policy_list", "status", "assigned", "captive_portal", "bandwidth")},
+            out.append({**{k: u.get(k) for k in ("name", "policy_list", "status", "assigned", "assignments", "detailed", "captive_portal", "bandwidth")},
                         "vlans": vl, "networks": on, "clients": counts.get(name, 0)})
         return out
 

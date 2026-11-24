@@ -33,20 +33,41 @@ def parse_unps(rows: list[dict]) -> dict[str, dict]:
                 vid = _vlan_id(v)
                 if vid:
                     vlans.add(vid)
-        assigned = []
+        in_use = {
+            (u or {}).get("deviceGroupId"): [t for t in (u or {}).get("inUseTypes") or [] if t]
+            for u in row.get("inUseAssignments") or []
+        }
+        assigned, assignments = [], []
         for a in row.get("assignments") or []:
             a = a or {}
             if a.get("device"):
-                assigned.append("Switch " + str(a["device"].get("friendlyName") or a["device"].get("serialNumber") or "?"))
+                kind, target = "Switch", str(a["device"].get("friendlyName") or a["device"].get("serialNumber") or "?")
             elif a.get("group"):
-                assigned.append("AP group " + str(a["group"].get("name") or "?"))
+                kind, target = "AP group", str(a["group"].get("name") or "?")
             elif a.get("site"):
-                assigned.append("Site " + str(a["site"].get("name") or "?"))
+                kind, target = "Site", str(a["site"].get("name") or "?")
+            else:
+                continue
+            assigned.append(f"{kind} {target}")
+            m = a.get("vlanTunnelMapping")
+            entry = {"kind": kind, "target": target, "status": a.get("configStatus")}
+            if isinstance(m, dict):
+                vids = [v for v in (_vlan_id(x) for x in m.get("vlans") or []) if v]
+                mtype = m.get("mappingType") or ""
+                entry["mapping"] = mtype or None
+                entry["vlans"] = vids
+                # On AP groups VLAN "0" (or none) means no mapping: the device stays on its SSID's VLAN.
+                entry["ssid_vlan"] = mtype in ("", "Vlan", "NoMapping") and not vids
+            if kind == "AP group":
+                entry["in_use"] = in_use.get((a.get("group") or {}).get("id"), [])
+            assignments.append(entry)
         bw = row.get("bandwidthControl") or {}
         cp = (row.get("captivePortal") or {}).get("captivePortalType")
         out[name] = {
             "name": name,
             "assigned": assigned,
+            "assignments": assignments,
+            "detailed": bool(row.get("_detailed")),
             "captive_portal": cp if cp and cp != "NONE" else None,
             "bandwidth": {k: bw[k] for k in ("upstreamBandwidth", "downstreamBandwidth") if bw.get(k)} or None,
             "policy_list": (row.get("policyList") or {}).get("name"),

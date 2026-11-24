@@ -2081,6 +2081,24 @@ class OvCirrusNetworkMap extends HTMLElement {
   }
 
   // ---------- access: Cirrus UNPs and the gateway firewall (read-only) ----------
+  _unpAssignments(u) {
+    const list = u.assignments || [];
+    if (!list.length)
+      return (u.assigned || []).map((a) => `<div>${esc(a)}</div>`).join("") || `<span class="muted">not assigned</span>`;
+    return list
+      .map((a) => {
+        let map = "";
+        if (a.vlans?.length) map = a.vlans.map((v) => `<span class="vchip static" style="--c:${vlanColor(v)}"><i></i>${esc(v)}</span>`).join(" ");
+        else if (a.ssid_vlan) map = `<span class="muted">→ SSID VLAN</span>`;
+        else if (a.mapping) map = `<span class="muted">${esc(a.mapping)}</span>`;
+        else if (u.detailed === false) map = `<span class="muted" title="Cirrus didn't return this UNP's detail">VLAN ?</span>`;
+        const tip = `${a.kind} ${a.target}${a.in_use?.length ? ` · used by ${a.in_use.map((t) => (t === "SSID" ? "an SSID" : t)).join(", ")}` : ""}`;
+        const bad = a.status && a.status !== "SUCCESSFUL" ? ` <span class="regwarn">· ${esc(a.status.toLowerCase())}</span>` : "";
+        return `<div class="unpassign" title="${esc(tip)}">${a.kind === "AP group" ? "APs" : esc(a.kind)} <b>${esc(a.target.match(/\(([^)]+)\)$/)?.[1] || a.target)}</b> ${map}${bad}</div>`;
+      })
+      .join("");
+  }
+
   _accessView(site) {
     const fw = site?.firewall || {}, unps = site?.unp_details || [];
     const zones = fw.zones || [], zname = Object.fromEntries(zones.map((z) => [z.id, z.name]));
@@ -2094,13 +2112,14 @@ class OvCirrusNetworkMap extends HTMLElement {
       .filter((u) => this._unpBuiltin || !builtin(u) || u.clients)
       .map(
         (u) => `<tr><td><b>${esc(u.name)}</b>${u.status && u.status !== "SUCCESSFUL" ? `<div class="muted">${esc(u.status)}</div>` : ""}</td>
-          <td>${(u.assigned || []).map((a) => `<div>${esc(a)}</div>`).join("") || `<span class="muted">not assigned</span>`}</td>
+          <td>${this._unpAssignments(u)}</td>
           <td>${
             u.networks?.length
               ? u.networks
                   .map((n) => `<div title="From ${esc(n.how || "Cirrus")}">${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span> ` : ""}${esc(n.network)} <span class="mono muted">${esc(n.cidr)}</span> ${zchip(n.zone_id, n.zone)}</div>`)
                   .join("")
               : u.vlans?.length ? u.vlans.map((v) => `<span class="vchip static" style="--c:${vlanColor(v)}"><i></i>${esc(v)}</span>`).join(" ")
+              : (u.assignments || []).some((a) => a.ssid_vlan) ? `<span class="muted" title="Every assignment leaves the VLAN unset, so wireless devices stay on their SSID's VLAN (see Wireless networks below)">SSID's VLAN</span>`
               : `<span class="muted" title="Cirrus doesn't report the VLAN; it shows once a device is online in this UNP">not known yet</span>`
           }</td>
           <td class="num">${u.clients || 0}</td>
@@ -2114,7 +2133,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     const unpSection = `<section class="net"><div class="nethead static"><ha-icon icon="mdi:badge-account-outline"></ha-icon><b>UNPs (Cirrus access roles)</b><span class="muted">${unps.length} profile${unps.length === 1 ? "" : "s"}</span></div>
       ${unps.length && !anyRules ? `<div class="fwnote">None of these UNPs has Cirrus access rules (a policy list): each one only picks the VLAN a device lands on. What that VLAN can reach is decided by the gateway's firewall below. Click a zone to see its rules.</div>` : ""}
       ${nBuiltin ? `<div class="fwnote"><label class="check"><input type="checkbox" data-unpbuiltin ${this._unpBuiltin ? "checked" : ""}> Show Cirrus's ${nBuiltin} built-in profiles (devProf…, default…)</label></div>` : ""}
-      ${unps.length ? `<table class="iptable fwtable"><thead><tr><th>UNP</th><th>Assigned to</th><th>VLAN → network · zone</th><th class="num">Online</th><th>Other settings</th></tr></thead><tbody>${unpRows}</tbody></table>` : `<div class="empty">${esc(site?.access_error || "No UNPs from Cirrus.")}</div>`}</section>`;
+      ${unps.length ? `<table class="iptable fwtable"><thead><tr><th>UNP</th><th>Assigned to · VLAN</th><th>VLAN → network · zone</th><th class="num">Online</th><th>Other settings</th></tr></thead><tbody>${unpRows}</tbody></table>` : `<div class="empty">${esc(site?.access_error || "No UNPs from Cirrus.")}</div>`}</section>`;
 
     const ssids = site?.ssids || [];
     const ssidSection = ssids.length
