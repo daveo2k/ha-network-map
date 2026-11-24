@@ -57,6 +57,46 @@ const bandOrder = (b) => {
 // Devices and clients are drawn at SIZE_BASE times the 42px ring, times the viewer's size (1x default);
 // the Internet node stays at 42px. Older settings were raw multipliers of 42px, so they are divided by SIZE_BASE.
 const SIZE_BASE = 3.75;
+// Fit never shrinks the map below this: wide rows of devices wrap instead, so text stays readable.
+const MIN_FIT = 0.85;
+
+const rowWidth = (items, w) => items.reduce((a, x) => a + w(x), 0) + GAP_X * Math.max(0, items.length - 1);
+
+// Greedy: as many per row as fit in max (always at least one).
+function packRows(items, w, max) {
+  const rows = [];
+  for (const it of items) {
+    const last = rows[rows.length - 1];
+    if (last && rowWidth([...last, it], w) <= max) last.push(it);
+    else rows.push([it]);
+  }
+  return rows.length ? rows : [[]];
+}
+
+// The fewest rows that fit in max, with the devices spread evenly over them (4 -> 2+2, not 3+1).
+function balancedRows(items, w, max) {
+  if (!items.length || !max || rowWidth(items, w) <= max) return [items];
+  for (let k = 2; k <= items.length; k++) {
+    const per = Math.ceil(items.length / k);
+    const rows = [];
+    for (let i = 0; i < items.length; i += per) rows.push(items.slice(i, i + per));
+    if (rows.every((r) => rowWidth(r, w) <= max)) return rows;
+  }
+  return items.map((x) => [x]);
+}
+
+const placedSince = (out, start) => [...out.nodes.slice(start[0]), ...out.groups.slice(start[1])];
+
+// Lowest point of everything placed since start ([nodes, groups] counts), so a next row clears it.
+function bottomOf(out, start) {
+  let b = -Infinity;
+  for (let i = start[0]; i < out.nodes.length; i++) b = Math.max(b, out.nodes[i]._y + (out.nodes[i]._ch || CHIP_H));
+  for (let i = start[1]; i < out.groups.length; i++) {
+    const g = out.groups[i];
+    if (g._y != null && g._h != null) b = Math.max(b, g._y + g._h);
+  }
+  return b === -Infinity ? 0 : b;
+}
 const BIG_KINDS = new Set(["gateway", "switch", "ap", "bridge", "endpoint", "manual"]);
 let DEVICE_SCALE = SIZE_BASE;
 const DS_MIN = 0.5, DS_MAX = 2, DS_STEP = 0.25, DS_KEY = "ovcirrus-device-size", DS_OLD_KEY = "ovcirrus-device-scale";
@@ -871,8 +911,10 @@ class OvCirrusNetworkMap extends HTMLElement {
       total += g._w;
     }
     total += GAP_X * (node._groups.length - 1);
-    node._gw = total;
-    node._w = Math.max(node._cw, total);
+    // Groups sit side by side; if that is wider than the screen allows, put them under each other.
+    node._groupRows = packRows(node._groups, (g) => g._w, this._wrapW);
+    node._gw = Math.max(...node._groupRows.map((r) => rowWidth(r, (g) => g._w)));
+    node._w = Math.max(node._cw, node._gw);
   }
 
   _measureGroup(g) {
@@ -896,14 +938,26 @@ class OvCirrusNetworkMap extends HTMLElement {
             const cols = Math.min(this._config.max_columns, kids.length);
             return { label, kids, cols, rows: Math.ceil(kids.length / cols), w: cols * g._colW + (cols - 1) * GAP_X };
           });
+        // Fit the screen: take a column away from the widest band until the box fits (or every band has one).
+        const sectionsW = () => g._sections.reduce((a, x) => a + x.w, 0) + BAND_GAP * (g._sections.length - 1);
+        const limit = this._wrapW - 2 * PAD - 2 * TRUNK;
+        while (sectionsW() > limit) {
+          const widest = g._sections.filter((x) => x.cols > 1).sort((a, b) => b.cols - a.cols || b.kids.length - a.kids.length)[0];
+          if (!widest) break;
+          widest.cols -= 1;
+          widest.rows = Math.ceil(widest.kids.length / widest.cols);
+          widest.w = widest.cols * g._colW + (widest.cols - 1) * GAP_X;
+        }
         g._rows = Math.max(...g._sections.map((x) => x.rows));
         g._bandH = bandH;
-        const inner = g._sections.reduce((a, x) => a + x.w, 0) + BAND_GAP * (g._sections.length - 1);
+        const inner = sectionsW();
         g._w = inner + 2 * PAD;
       } else {
         g._sections = null;
         g._bandH = 0;
         g._cols = Math.min(this._config.max_columns, n);
+        const limit = this._wrapW - 2 * PAD - 2 * TRUNK;
+        while (g._cols > 1 && g._cols * g._colW + (g._cols - 1) * GAP_X > limit) g._cols -= 1;
         g._rows = Math.ceil(n / g._cols);
         g._w = g._cols * g._colW + (g._cols - 1) * GAP_X + 2 * PAD;
       }
@@ -920,7 +974,9 @@ class OvCirrusNetworkMap extends HTMLElement {
       });
       g._rowsH = Math.max(0, ...g.children.map((c) => c._labelRows)) * LABEL_ROW;
       if (g._rowsH) g._rowsH += 6;
-      const inner = g.children.reduce((a, c) => a + c._slot, 0) + GAP_X * (n - 1);
+      // Devices sit in one row unless that would be wider than the screen allows: then balanced rows.
+      g._lines = balancedRows(g.children, (c) => c._slot, this._wrapW - 2 * PAD);
+      const inner = Math.max(...g._lines.map((r) => rowWidth(r, (c) => c._slot)));
       g._w = inner + 2 * PAD;
       g._h = LABEL_H + PAD + g._rowsH + Math.max(...g.children.map((c) => c._ch)) + PAD;
     }
@@ -969,9 +1025,14 @@ class OvCirrusNetworkMap extends HTMLElement {
       }
       return;
     }
-    let x = cx - node._gw / 2;
-    const gy = y + node._ch + V_GAP;
-    for (const g of node._groups) {
+    let gy = y + node._ch + V_GAP;
+    const above = []; // everything placed in earlier rows: links to later rows run down its left side
+    for (const groupRow of node._groupRows || [node._groups]) {
+    for (const g of groupRow) g._lane = above.length ? [...above] : null;
+    const rowAbove = [...above];
+    let x = cx - rowWidth(groupRow, (g) => g._w) / 2;
+    const rowStart = [out.nodes.length, out.groups.length];
+    for (const g of groupRow) {
       const above = g.leaf ? g._above || LABEL_H + PAD : LABEL_H + PAD + (g._rowsH || 0);
       const chipY = gy + above;
       out.groups.push(g);
@@ -981,11 +1042,19 @@ class OvCirrusNetworkMap extends HTMLElement {
         this._wrap(g, above);
         out.edges.push({ from: node, toGroup: g, label: "", status: "up", group: true });
       } else {
-        let cxs = x + PAD;
-        for (const c of g.children) {
+        let lineY = chipY;
+        let prevLine = null;
+        const laneItems = [...rowAbove];
+        (g._lines || [g.children]).forEach((line) => {
+        if (prevLine) lineY = bottomOf(out, prevLine) - oy + ROW_GAP * 2 + (g._rowsH || 0);
+        const lineStart = [out.nodes.length, out.groups.length];
+        const lane = laneItems.length ? [...laneItems] : null;
+        let cxs = x + PAD + (g._w - 2 * PAD - rowWidth(line, (c) => c._slot)) / 2;
+        for (const c of line) {
           const ccx = cxs + c._w / 2;
+          c._lane = lane; // in a wrapped row or a lower box: its link goes round the left of what is above
           c._box = g; // the box this device sits in (links to its children start from its centre)
-          this._place(c, ccx, chipY, out, ox, oy);
+          this._place(c, ccx, lineY, out, ox, oy);
           const link = c.link || {};
           out.edges.push({
             from: node,
@@ -1001,9 +1070,15 @@ class OvCirrusNetworkMap extends HTMLElement {
           });
           cxs += c._slot + GAP_X;
         }
+        prevLine = lineStart; // the next line goes under this one (and anything hanging off it)
+        laneItems.push(...placedSince(out, lineStart));
+        });
         this._wrap(g, above);
       }
       x += g._w + GAP_X;
+    }
+    gy = bottomOf(out, rowStart) - oy + V_GAP;
+    above.push(...placedSince(out, rowStart));
     }
   }
 
@@ -1124,6 +1199,10 @@ class OvCirrusNetworkMap extends HTMLElement {
       }
       VLAN_EXPANDED = this._vmore || (this._vmore = new Set());
       LINK_GRAPHS = !!this._linkGraphs;
+      const availW = (prevVp?.clientWidth || this.getBoundingClientRect().width || 800) - 4;
+      // In fit mode wide rows wrap so the map fits at MIN_FIT or larger; a chosen zoom wraps to the same width
+      // so the layout does not jump when zooming.
+      this._wrapW = cfg.wrap === false ? Infinity : Math.max(700, availW / MIN_FIT - 40);
       this._measure(root);
       const out = { nodes: [], groups: [], edges: [], trunks: [], maxY: 0 };
       if (!this._drag) this._offsets = { ...(site.positions || {}), ...(this._localOffsets || {}) };
@@ -1248,6 +1327,14 @@ class OvCirrusNetworkMap extends HTMLElement {
             });
           }
           const style = sv !== null && m && carries(m, sv) ? ` style="--c:${vlanColor(sv)}"` : "";
+          const lane = e.toGroup ? e.toGroup._lane : e.to?._lane;
+          if (lane?.length) {
+            // Devices are above it (a wrapped row or a lower box): go down the left of them, then along above it.
+            const tx = Math.min(...lane.map((b) => (b._bx ?? b._x))) - 12;
+            const ty = Math.min(...lane.map((b) => b._y)) - 8;
+            const bus = e.toGroup ? y2 - 10 : y2 - LABEL_ROW - 10, k = 6;
+            return `<path class="${lineCls(e.status, m)}"${style} d="M${x1},${y1} C${x1},${(y1 + ty) / 2} ${tx},${(y1 + ty) / 2} ${tx},${ty + k} V${bus - k} Q${tx},${bus} ${tx + k},${bus} H${x2 - k} Q${x2},${bus} ${x2},${bus + k} V${y2}"/>`;
+          }
           return `<path class="${lineCls(e.status, m)}"${style} d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"/>`;
         })
         .join("") +
