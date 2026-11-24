@@ -1686,7 +1686,7 @@ class OvCirrusNetworkMap extends HTMLElement {
   }
 
   _alertsView(site) {
-    if (site?.alerts_error) return `<div class="empty">${esc(site.alerts_error)}. Give it read access to alerts in Cirrus to see them here.</div>`;
+    if (site?.alerts_error) return `<div class="empty">${esc(site.alerts_error)}</div>`;
     const all = site?.alerts || [];
     const SEVS = ["critical", "major", "minor", "warning", "info"];
     const shown = all.filter((a) => this._showAcked || !a.acknowledged);

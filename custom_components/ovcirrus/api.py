@@ -235,30 +235,38 @@ class CirrusClient:
     async def get_alerts(self, org_id: str, site_ids: list[str], days: int = 7) -> list[dict]:
         """Alerts for the chosen sites from the last few days (acknowledged ones included).
 
-        The API needs the time window (firstOccurrence / lastOccurrence, ISO 8601 with milliseconds).
+        Uses alertsummary, which is what the Cirrus web UI reads. With period "None" it returns one record per
+        alert (id, device, client MAC, SSID, reason); startDate/endDate (ISO 8601 with milliseconds) and period
+        are required, otherwise the server answers HTTP 400.
         """
         now = datetime.now(timezone.utc)
         iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"  # noqa: E731
-        params = {
-            "scope": "site",
-            "scopeId[]": site_ids,
-            "limit": 300,
-            "offset": 0,
-            "firstOccurrence": iso(now - timedelta(days=days)),
-            "lastOccurrence": iso(now),
-        }
-        try:
-            data = await self._get(f"/ov/v1/organizations/{org_id}/alerts/details", params, optional=True)
-        except CirrusApiError as err:
-            if "HTTP 400" not in str(err) or len(site_ids) != 1:
-                raise
-            # Some releases also insist on siteId when the scope is one site.
+        rows: list[dict] = []
+        offset = 0
+        while True:
             data = await self._get(
-                f"/ov/v1/organizations/{org_id}/alerts/details", {**params, "siteId": site_ids[0]}, optional=True
+                f"/ov/v1/organizations/{org_id}/alerts/alertsummary",
+                {
+                    "startDate": iso(now - timedelta(days=days)),
+                    "endDate": iso(now),
+                    "scope": "site",
+                    "scopeId[]": site_ids,
+                    "offset": offset,
+                    "limit": 300,
+                    "period": "None",
+                },
+                optional=True,
             )
-        if isinstance(data, list):
-            return data
-        return ((data or {}).get("list") or []) if isinstance(data, dict) else []
+            if isinstance(data, list):
+                batch = data
+            elif isinstance(data, dict):
+                batch = data.get("result") or data.get("list") or []
+            else:
+                batch = []
+            rows.extend(batch)
+            if len(batch) < 300 or offset >= 1800:
+                return rows
+            offset += 300
 
 
 def _encode_params(params: dict[str, Any]) -> list[tuple[str, str]]:

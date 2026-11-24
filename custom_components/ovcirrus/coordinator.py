@@ -412,7 +412,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             self._sessions_ok = True
         add_seen_vlans(data.unps, data.sessions)
         if isinstance(alerts, CirrusForbiddenError):
-            data.alerts_error = "The Cirrus application's user may not read alerts"
+            data.alerts_error = "The Cirrus application's user may not read alerts. Give it read access to alerts in Cirrus to see them here."
         elif isinstance(alerts, Exception):
             (_LOGGER.debug if self._alerts_warned else _LOGGER.warning)("Cirrus alerts read failed: %s", alerts)
             self._alerts_warned = True
