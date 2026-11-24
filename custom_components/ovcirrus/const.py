@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "ovcirrus"
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 DEFAULT_HOST = "uk.manage.ovcirrus.com"
 REGION_HOSTS = [
