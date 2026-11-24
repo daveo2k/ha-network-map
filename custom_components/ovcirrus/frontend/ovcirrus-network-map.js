@@ -28,7 +28,7 @@ let FS = 1; // text size multiplier for the map (text size in px / NAME_PX)
 // The map text size is set as the pt size of device names; every other map label keeps its proportion.
 const NAME_PX = 13; // .name font-size in the CSS below, i.e. the size at FS = 1
 const PT_PX = 4 / 3; // 1pt = 1.333px
-const TEXT_DEFAULT = 12, TEXT_MIN = 8, TEXT_MAX = 30, TEXT_KEY = "ovcirrus-text-pt";
+const TEXT_DEFAULT = 11, TEXT_MIN = 8, TEXT_MAX = 30, TEXT_KEY = "ovcirrus-text-pt";
 const textFs = (pt) => ((pt || TEXT_DEFAULT) * PT_PX) / NAME_PX;
 const FS_KEY = "ovcirrus-font-scale"; // legacy multiplier, read once and converted
 const clampText = (v) => Math.round(Math.min(TEXT_MAX, Math.max(TEXT_MIN, Number(v) || TEXT_DEFAULT)));
@@ -106,6 +106,7 @@ let CLIENT_SCALE = SIZE_BASE;
 const CS_MIN = 0.25, CS_MAX = 2, CS_STEP = 0.25, CS_KEY = "ovcirrus-client-size", CS_OLD_KEY = "ovcirrus-client-scale";
 const clampSize = (v, lo, hi) => (Number(v) ? Math.min(hi, Math.max(lo, Math.round(Number(v) * 4) / 4)) : null);
 // size in the new units from a new value, else from an old raw multiplier
+const DS_DEFAULT = 0.5, CS_DEFAULT = 0.25;
 const sizeFrom = (v, old, lo, hi) => clampSize(v, lo, hi) || (Number(old) ? clampSize(Number(old) / SIZE_BASE, lo, hi) : null);
 const ringSize = (n) =>
   BIG_KINDS.has(n.kind) ? Math.round(42 * DEVICE_SCALE) : CLIENT_KINDS.has(n.kind) ? Math.round(42 * CLIENT_SCALE) : 42;
@@ -627,11 +628,11 @@ class OvCirrusNetworkMap extends HTMLElement {
   }
 
   _cfgDevice() {
-    return sizeFrom(this._config?.device_size, this._config?.device_scale, DS_MIN, DS_MAX) || 1;
+    return sizeFrom(this._config?.device_size, this._config?.device_scale, DS_MIN, DS_MAX) || DS_DEFAULT;
   }
 
   _cfgClient() {
-    return sizeFrom(this._config?.client_size, this._config?.client_scale, CS_MIN, CS_MAX) || 1;
+    return sizeFrom(this._config?.client_size, this._config?.client_scale, CS_MIN, CS_MAX) || CS_DEFAULT;
   }
 
   static getStubConfig() {
@@ -710,6 +711,8 @@ class OvCirrusNetworkMap extends HTMLElement {
   _updateRates() {
     const root = this.shadowRoot;
     root.querySelectorAll(".lspark[data-port]").forEach((el) => (el.innerHTML = sparkSvg(ratePoints("30m", el.dataset.port))));
+    const pop = root.querySelector(".sparkpop");
+    if (pop && !pop.hidden && this._sparkPort) pop.innerHTML = this._sparkPopHtml(this._sparkPort);
     const range = this._chartRange();
     root.querySelectorAll(".tspark[data-port]").forEach((el) => {
       if (el.innerHTML) el.innerHTML = sparkSvg(ratePoints(range, el.dataset.port), 48, 16);
@@ -724,6 +727,59 @@ class OvCirrusNetworkMap extends HTMLElement {
       if (last && nowUp) nowUp.textContent = fmtRate(last[2]);
       this._bindChart(wrap, pts);
     }
+  }
+
+  // ---------- link graph popover (hover a link's little graph; click it for the gateway's full chart) ----------
+  _gatewayNode() {
+    return [...(this._index?.values() || [])].find((n) => n.unifi);
+  }
+
+  _sparkPopHtml(port) {
+    const p = (this._gatewayNode()?.unifi?.ports || []).find((x) => x.ifname === port) || {};
+    const wan = p.role === "wan";
+    const title = wan && /^Port \d+$/.test(p.name || "") ? "WAN" : p.name || port;
+    const dn = wan ? "Download" : `To ${p.name || port}`, up = wan ? "Upload" : `From ${p.name || port}`;
+    const pts = ratePoints("30m", port);
+    const last = pts[pts.length - 1];
+    const now = (k) => (last ? esc(fmtRate(last[k])) : "–");
+    return `<div class="uchead"><b>${esc(title)}</b><span class="muted">${esc(port)} · last 30 min</span></div>
+      <div class="ulegend"><span><i class="key dn"></i>↓ ${esc(dn)} <b>${now(1)}</b></span><span><i class="key up"></i>↑ ${esc(up)} <b>${now(2)}</b></span></div>
+      ${bandwidthChart(pts, "30m", dn, up)}<div class="pophint">Click for the full graph and other time ranges</div>`;
+  }
+
+  _showSpark(el) {
+    let pop = this.shadowRoot.querySelector(".sparkpop");
+    if (!pop) {
+      pop = document.createElement("div");
+      pop.className = "sparkpop";
+      this.shadowRoot.appendChild(pop);
+    }
+    this._sparkPort = el.dataset.port;
+    pop.innerHTML = this._sparkPopHtml(this._sparkPort);
+    pop.hidden = false;
+    const r = el.getBoundingClientRect();
+    const w = pop.offsetWidth, h = pop.offsetHeight;
+    const left = Math.min(window.innerWidth - w - 8, Math.max(8, r.left + r.width / 2 - w / 2));
+    const top = r.top - h - 8 >= 8 ? r.top - h - 8 : Math.min(window.innerHeight - h - 8, r.bottom + 8);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }
+
+  _hideSpark() {
+    this._sparkPort = null;
+    const pop = this.shadowRoot.querySelector(".sparkpop");
+    if (pop) pop.hidden = true;
+  }
+
+  _openPortChart(port) {
+    const gw = this._gatewayNode();
+    if (!gw) return;
+    this._hideSpark();
+    this._rPort = port;
+    this._selected = gw.id;
+    this._render();
+    this._fetchRates(true);
+    this.shadowRoot.querySelector(".uchartwrap")?.scrollIntoView({ block: "nearest" });
   }
 
   _bindChart(wrap, pts) {
@@ -964,20 +1020,24 @@ class OvCirrusNetworkMap extends HTMLElement {
       g._above = LABEL_H + PAD + g._bandH;
       g._h = g._above + g._rows * g._rowH + (g._rows - 1) * ROW_GAP + PAD;
     } else {
+      let underW = 0; // clients of APs in this box open under the box, not beside the AP
       g.children.forEach((c) => {
         this._measure(c);
         const ext = this._labelExtent(c);
         c._labelRight = ext.right;
         c._labelRows = ext.rows;
+        const under = c._stack && !c._collapsed && c._groups?.length;
+        c._own = under ? c._cw : c._w;
+        if (under) underW = Math.max(underW, c._gw);
         // Slot = the subtree, widened on the right if the link labels reach further.
-        c._slot = Math.max(c._w, c._w / 2 + ext.right + 4);
+        c._slot = Math.max(c._own, c._own / 2 + ext.right + 4);
       });
       g._rowsH = Math.max(0, ...g.children.map((c) => c._labelRows)) * LABEL_ROW;
       if (g._rowsH) g._rowsH += 6;
       // Devices sit in one row unless that would be wider than the screen allows: then balanced rows.
       g._lines = balancedRows(g.children, (c) => c._slot, this._wrapW - 2 * PAD);
       const inner = Math.max(...g._lines.map((r) => rowWidth(r, (c) => c._slot)));
-      g._w = inner + 2 * PAD;
+      g._w = Math.max(inner + 2 * PAD, underW + PAD);
       g._h = LABEL_H + PAD + g._rowsH + Math.max(...g.children.map((c) => c._ch)) + PAD;
     }
   }
@@ -1003,7 +1063,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     g._h = bottom - top;
   }
 
-  _place(node, cx, y, out, ox = 0, oy = 0) {
+  _place(node, cx, y, out, ox = 0, oy = 0, defer = null) {
     const [dx, dy] = this._off(node.id);
     ox += dx;
     oy += dy;
@@ -1011,6 +1071,10 @@ class OvCirrusNetworkMap extends HTMLElement {
     node._y = y + oy;
     out.nodes.push(node);
     if (!node._groups.length || node._collapsed) return;
+    if (node._stack && defer) {
+      defer.push(node); // its clients go under the box it sits in, placed once the box is done
+      return;
+    }
     if (node._stack) {
       const trunkX = cx - node._gw / 2 + TRUNK / 2;
       let gy = y + node._ch + 36;
@@ -1019,6 +1083,7 @@ class OvCirrusNetworkMap extends HTMLElement {
         g._y = gy + oy;
         this._placeLeaves(g, g._y + (g._above || LABEL_H + PAD), out);
         this._wrap(g, g._above || LABEL_H + PAD);
+        g._owner = null;
         out.groups.push(g);
         out.trunks.push({ node, g });
         gy += g._h + 34;
@@ -1044,6 +1109,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       } else {
         let lineY = chipY;
         let prevLine = null;
+        const deferred = [];
         const laneItems = [...rowAbove];
         (g._lines || [g.children]).forEach((line) => {
         if (prevLine) lineY = bottomOf(out, prevLine) - oy + ROW_GAP * 2 + (g._rowsH || 0);
@@ -1051,10 +1117,12 @@ class OvCirrusNetworkMap extends HTMLElement {
         const lane = laneItems.length ? [...laneItems] : null;
         let cxs = x + PAD + (g._w - 2 * PAD - rowWidth(line, (c) => c._slot)) / 2;
         for (const c of line) {
-          const ccx = cxs + c._w / 2;
+          const ccx = cxs + (c._own ?? c._w) / 2;
           c._lane = lane; // in a wrapped row or a lower box: its link goes round the left of what is above
           c._box = g; // the box this device sits in (links to its children start from its centre)
-          this._place(c, ccx, lineY, out, ox, oy);
+          const before = deferred.length;
+          this._place(c, ccx, lineY, out, ox, oy, deferred);
+          if (deferred.length > before) c._under = true;
           const link = c.link || {};
           out.edges.push({
             from: node,
@@ -1070,10 +1138,27 @@ class OvCirrusNetworkMap extends HTMLElement {
           });
           cxs += c._slot + GAP_X;
         }
+        const lineBottom = bottomOf(out, lineStart);
+        for (const c of line) if (c._under) c._viaDy = lineBottom + 7 - c._y; // run under the row to the box edge
         prevLine = lineStart; // the next line goes under this one (and anything hanging off it)
         laneItems.push(...placedSince(out, lineStart));
         });
         this._wrap(g, above);
+        // Expanded APs: their client boxes go under this box, one below the other, labelled with the AP.
+        let sy = g._y + g._h + 24;
+        for (const n of deferred) {
+          n._under = false;
+          for (const cg of n._groups) {
+            cg._x = g._bx + 7 + TRUNK / 2;
+            cg._y = sy;
+            cg._owner = n;
+            this._placeLeaves(cg, cg._y + (cg._above || LABEL_H + PAD), out);
+            this._wrap(cg, cg._above || LABEL_H + PAD);
+            out.groups.push(cg);
+            out.trunks.push({ node: n, g: cg, below: n._viaDy });
+            sy += cg._h + 16;
+          }
+        }
       }
       x += g._w + GAP_X;
     }
@@ -1147,9 +1232,15 @@ class OvCirrusNetworkMap extends HTMLElement {
         e.toY = e.to._y;
       }
     }
-    out.trunks = out.trunks.map(({ node, g }) => ({
-      x1: node._x + 6, y1: node._y + node._ch / 2, tx: g._bx - TRUNK / 2, ty: g._y + 2, x2: g._bx,
-    }));
+    out.trunks = out.trunks.map(({ node, g, below }) => {
+      if (below == null) return { x1: node._x + 6, y1: node._y + node._ch / 2, tx: g._bx - TRUNK / 2, ty: g._y + 2, x2: g._bx };
+      // From the bottom of the AP's ring, under its row, down the inside edge of the box to its client box.
+      const ring = ringSize(node) + 6;
+      return {
+        via: true, x1: node._x + 6 + ring / 2, y1: node._y + node._ch / 2 + ring / 2, vy: node._y + below,
+        tx: g._bx - TRUNK / 2, ty: g._y + 2, x2: g._bx,
+      };
+    });
     out.maxX = Math.max(...out.nodes.map((n) => n._x + (n._rw || n._cw)), ...out.groups.map((g) => g._bx + g._bw));
     out.maxY = Math.max(...out.nodes.map((n) => n._y + (n._ch || CHIP_H)), ...out.groups.map((g) => g._y + g._h));
   }
@@ -1339,13 +1430,17 @@ class OvCirrusNetworkMap extends HTMLElement {
         })
         .join("") +
         out.trunks
-          .map((t) => `<path class="edge" d="M${t.x1},${t.y1} H${t.tx + 8} Q${t.tx},${t.y1} ${t.tx},${t.y1 + 8} V${t.ty - 8} Q${t.tx},${t.ty} ${t.tx + 8},${t.ty} H${t.x2}"/>`)
+          .map((t) =>
+            t.via
+              ? `<path class="edge" d="M${t.x1},${t.y1} V${t.vy - 6} Q${t.x1},${t.vy} ${t.x1 - 6},${t.vy} H${t.tx + 6} Q${t.tx},${t.vy} ${t.tx},${t.vy + 6} V${t.ty - 8} Q${t.tx},${t.ty} ${t.tx + 8},${t.ty} H${t.x2}"/>`
+              : `<path class="edge" d="M${t.x1},${t.y1} H${t.tx + 8} Q${t.tx},${t.y1} ${t.tx},${t.y1 + 8} V${t.ty - 8} Q${t.tx},${t.ty} ${t.tx + 8},${t.ty} H${t.x2}"/>`
+          )
           .join("");
 
       const groups = out.groups
         .map(
           (g) => `<div class="group" data-gid="${esc(g.id)}" style="left:${g._bx}px;top:${g._y}px;width:${g._bw}px;height:${g._h}px">
-            <div class="glabel"><ha-icon icon="${esc(g.icon)}"></ha-icon><span>${esc(g.label)}</span></div>${(g._bandMarks || [])
+            <div class="glabel"><ha-icon icon="${esc(g.icon)}"></ha-icon><span>${g._owner ? `<b>${esc(g._owner.name)}</b> · ` : ""}${esc(g.label)}</span></div>${(g._bandMarks || [])
               .map((m) => `<div class="band" style="left:${m.x - g._bx}px;top:${m.y - g._y}px">${esc(m.label)} <span>(${m.count})</span></div>`)
               .join("")}${(g._seps || [])
               .map((m) => `<div class="bandsep" style="left:${m.x - g._bx}px;top:${LABEL_H + PAD - 2}px;bottom:${PAD - 2}px"></div>`)
@@ -2588,6 +2683,15 @@ class OvCirrusNetworkMap extends HTMLElement {
         .map((tr) => tr.dataset.alert);
       if (ids.length && confirm(`Acknowledge ${ids.length} alert${ids.length > 1 ? "s" : ""} in Cirrus?`)) this._ackAlerts(ids);
     });
+    root.querySelectorAll(".lspark[data-port]").forEach((el) => {
+      el.title = "";
+      el.addEventListener("pointerenter", () => this._showSpark(el));
+      el.addEventListener("pointerleave", () => this._hideSpark());
+      el.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        this._openPortChart(el.dataset.port);
+      });
+    });
     root.querySelectorAll("[data-sev]").forEach((b) =>
       b.addEventListener("click", () => {
         this._alertSev = b.dataset.sev;
@@ -2976,7 +3080,13 @@ const STYLE = `
   .uchart-empty { font-size:12px; color:var(--secondary-text-color); padding:24px 4px; text-align:center; border:1px dashed var(--divider-color); border-radius:8px; }
   svg.spark { display:block; } svg.spark .spark-line { fill:none; stroke:var(--ovc-dn); stroke-width:1.4; stroke-linejoin:round; }
   svg.spark .spark-area { fill:var(--ovc-dn); opacity:.14; } svg.spark .spark-base { stroke:var(--ovc-grid); }
-  .lspark { display:inline-block; vertical-align:middle; margin-left:4px; }
+  .lspark { display:inline-block; vertical-align:middle; margin-left:4px; cursor:pointer; border-radius:3px; }
+  .lspark:hover { outline:1px solid var(--primary-color); outline-offset:1px; }
+  .sparkpop { position:fixed; z-index:20; width:380px; max-width:calc(100vw - 16px); box-sizing:border-box; padding:10px 12px 8px;
+    background:var(--card-background-color, #fff); color:var(--primary-text-color); border:1px solid var(--divider-color);
+    border-radius:10px; box-shadow:0 6px 24px rgba(0,0,0,.18); pointer-events:none; font-size:13px; }
+  .sparkpop[hidden] { display:none; }
+  .sparkpop .pophint { margin-top:4px; font-size:11px; color:var(--secondary-text-color); }
   table.uports tr[data-rport] { cursor:pointer; }
   table.uports tr.sel td { background:color-mix(in srgb, var(--primary-color) 9%, transparent); }
   table.uports td.trend { padding:2px 4px; width:48px; }

@@ -63,12 +63,12 @@ height: 640               # px
 refresh: 30               # seconds
 expand_clients: false     # start with AP client lists expanded
 max_columns: 3            # client chips per row inside an SSID box
-text_size: 12             # pt size of device names (8-30); other map labels scale with it; viewers can change it in the View menu
+text_size: 11             # pt size of device names (8-30); other map labels scale with it; viewers can change it in the View menu
 layout_editing: admin     # who can drag devices and save the layout: admin (default), true or false
 snap_to_grid: true        # snap dragged devices to a grid (viewers can toggle it in edit mode)
 grid_size: 20             # grid spacing in px
-device_size: 1            # starting size of gateways, switches, APs and wired devices (0.5-2); viewers can change it
-client_size: 1            # starting size of wireless and wired clients (0.25-2); viewers can change it
+device_size: 0.5          # starting size of gateways, switches, APs and wired devices (0.5-2); viewers can change it
+client_size: 0.25         # starting size of wireless and wired clients (0.25-2); viewers can change it
 show_vlans: true          # VLAN legend above the map
 link_graphs: false        # small traffic trend on the gateway's link labels (UniFi); viewers can toggle it
 rate_ranges: [30m, 2h, 24h]  # bandwidth chart range buttons: 15m 30m 1h 2h 6h 12h 24h 3d 7d
