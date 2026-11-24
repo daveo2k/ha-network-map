@@ -2276,7 +2276,8 @@ class OvCirrusNetworkMap extends HTMLElement {
               .map((a) => {
                 const q = [a.type, a.reason, a.device, a.client_mac, a.ssid, a.site].filter(Boolean).join(" ").toLowerCase();
                 const when = a.time ? new Date(a.time * 1000).toLocaleString() : "";
-                return `<tr class="${a.acknowledged ? "acked" : ""}" data-q="${esc(q)}" data-alert="${esc(a.id)}" data-open="${a.acknowledged ? "" : "1"}"><td title="${esc(when)}">${esc(ago(a.time))}</td>
+                const open = this._alertOpen === a.id;
+                return `<tr class="alertrow${a.acknowledged ? " acked" : ""}${open ? " open" : ""}" data-q="${esc(q)}" data-alert="${esc(a.id)}" data-open="${a.acknowledged ? "" : "1"}" title="Click for details"><td title="${esc(when)}">${esc(ago(a.time))}</td>
                   <td><span class="pill sev ${esc(a.severity || "")}">${esc(a.severity || "–")}</span></td>
                   <td><b>${esc(a.type || "Alert")}</b>${a.reason ? `<div class="muted">${esc(a.reason)}</div>` : ""}</td>
                   <td>${a.device_mac && this._macOnMap(a.device_mac) ? macCell(a.device_mac) : esc(a.device || "")}${a.ssid ? `<div class="muted">${esc(a.ssid)}</div>` : ""}</td>
@@ -2284,11 +2285,94 @@ class OvCirrusNetworkMap extends HTMLElement {
                     this._isAdmin
                       ? `<td>${a.acknowledged ? `<ha-icon class="ackd" icon="mdi:check" title="Acknowledged"></ha-icon>` : `<button class="ackbtn" data-ack="${esc(a.id)}" ${canAck ? "" : "disabled"} title="Acknowledge (also in Cirrus)"><ha-icon icon="mdi:check"></ha-icon></button>`}</td>`
                       : ""
-                  }</tr>`;
+                  }</tr>${open ? `<tr class="alertdetail" data-q="${esc(q)}"><td colspan="${this._isAdmin ? 6 : 5}">${this._alertDetail(a, all)}</td></tr>` : ""}`;
               })
               .join("")}</tbody></table>`
           : `<div class="empty">${all.length ? "No alerts match." : "No alerts from Cirrus for this site."}</div>`
       }`;
+  }
+
+  _alertDetail(a, all) {
+    const kv = (rows) =>
+      rows.filter(([, v]) => v !== undefined && v !== null && v !== "").map(([k, v]) => `<div class="k">${esc(k)}</div><div>${v}</div>`).join("");
+    const when = (t) => (t ? new Date(t * 1000).toLocaleString() : "");
+    const isoWhen = (v) => { const t = Date.parse(v); return isNaN(t) ? esc(v) : esc(new Date(t).toLocaleString()); };
+    const nodeBox = (mac, title) => {
+      if (!mac) return "";
+      const n = this._macOnMap(mac);
+      if (!n) return `<div class="adbox"><h4>${esc(title)}</h4><div class="mono">${esc(mac)}</div><div class="muted">Not on the map now (offline or not seen).</div></div>`;
+      const det = (n.details || []).filter(([k]) => !/^(MAC|Name)$/i.test(k)).slice(0, 12);
+      return `<div class="adbox"><h4>${esc(title)}</h4><div><a href="#" data-goto="${esc(mac)}">${esc(n.name)}</a> <span class="mono muted">${esc(mac)}</span></div>
+        <div class="adkv">${kv(det.map(([k, v]) => [k, esc(v)]))}</div></div>`;
+    };
+    const related = (key, label) => {
+      const v = a[key];
+      if (!v) return "";
+      const others = all.filter((x) => x.id !== a.id && x[key] === v);
+      if (!others.length) return `<div class="muted">No other alerts for this ${label} in the last 7 days.</div>`;
+      const byType = {};
+      others.forEach((x) => (byType[x.type || "Alert"] = (byType[x.type || "Alert"] || 0) + 1));
+      return `<div><b>${others.length}</b> other alert${others.length > 1 ? "s" : ""} for this ${label} in the last 7 days: ${Object.entries(byType)
+        .sort((p, q) => q[1] - p[1]).map(([t, n]) => `${esc(t)} <span class="muted">×${n}</span>`).join(", ")}</div>`;
+    };
+    const d = this._alertDet?.[a.id];
+    let cirrus;
+    if (!d || d.loading) cirrus = `<div class="muted">Loading more from Cirrus…</div>`;
+    else if (d.error) cirrus = `<div class="ackerr">${esc(d.error)}</div>`;
+    else {
+      const f = d.fields || {};
+      const occ = f.recordCount || f.recurrence;
+      const main = kv([
+        ["Category", esc(d.category || "")],
+        ["Description", f.description && f.description !== a.reason ? esc(f.description) : ""],
+        ["First seen", f.firstOccurence ? isoWhen(f.firstOccurence) : ""],
+        ["Last seen", f.lastOccurence ? isoWhen(f.lastOccurence) : ""],
+        ["Occurrences", occ > 1 ? esc(occ) : ""],
+        ["Code", esc(f.code || "")],
+        ["Source", esc(f.source || "")],
+        ["Device IP", f.deviceIp ? `<span class="mono">${esc(f.deviceIp)}</span>` : ""],
+        ["Radio / VAP", esc(f.vap || "")],
+        ["Firmware", esc(f.version || "")],
+        ["Alert enabled", d.definition ? (d.definition.isEnabled === false ? "no" : "yes") : ""],
+      ]);
+      const hist = d.client_history;
+      const histHtml = hist == null ? "" : hist.length
+        ? `<div class="adbox wide"><h4>This client's alerts in Cirrus (30 days) <span class="muted">${hist.length}</span></h4><table class="adhist">${hist.slice(0, 25)
+            .map((h) => `<tr class="${h.acknowledged ? "acked" : ""}${h.id === a.id ? " cur" : ""}"><td>${esc(when(h.time))}</td><td><span class="pill sev ${esc(h.severity || "")}">${esc(h.severity || "–")}</span></td><td>${esc(h.type || "")}${h.reason ? ` <span class="muted">${esc(h.reason)}</span>` : ""}</td><td>${esc(h.device || "")}${h.ssid ? ` <span class="muted">${esc(h.ssid)}</span>` : ""}</td></tr>`)
+            .join("")}</table>${hist.length > 25 ? `<div class="muted">…and ${hist.length - 25} more</div>` : ""}</div>`
+        : `<div class="adbox wide"><h4>This client's alerts in Cirrus (30 days)</h4><div class="muted">None other than this.</div></div>`;
+      const errs = Object.entries(d.errors || {}).map(([k, e]) => `<div class="muted">Couldn't read ${k === "client_history" ? "the client's alert history" : "alert definitions"}: ${esc(e)}</div>`).join("");
+      const allRows = Object.entries(f).sort(([p], [q]) => p.localeCompare(q)).map(([k, v]) => [k, `<span class="mono">${esc(v)}</span>`]);
+      cirrus = `${main ? `<div class="adkv">${main}</div>` : ""}${histHtml}${errs}
+        <details class="adraw"><summary>Every field Cirrus sent (${allRows.length})</summary><div class="adkv">${kv(allRows)}</div></details>`;
+    }
+    return `<div class="alertdet">
+      <div class="adbox"><h4>Alert</h4><div class="adkv">${kv([
+        ["When", esc(when(a.time))],
+        ["Type", esc(a.type || "")],
+        ["Reason", esc(a.reason || "")],
+        ["SSID", esc(a.ssid || "")],
+        ["Site", esc(a.site || "")],
+        ["Status", a.acknowledged ? "acknowledged" : "open"],
+      ])}</div>${related("device_mac", "device")}${related("client_mac", "client")}</div>
+      ${nodeBox(a.device_mac, "Device")}${nodeBox(a.client_mac, "Client")}
+      <div class="adbox wide"><h4>From Cirrus</h4>${cirrus}</div></div>`;
+  }
+
+  async _toggleAlert(id) {
+    this._alertOpen = this._alertOpen === id ? null : id;
+    this._alertDet = this._alertDet || {};
+    const site = this._sites?.[this._siteIdx];
+    if (this._alertOpen && site && !this._alertDet[id]?.fields) {
+      this._alertDet[id] = { loading: true };
+      this._render();
+      try {
+        this._alertDet[id] = await this._hass.callWS({ type: "ovcirrus/alert_details", entry_id: site.entry_id, alert_id: id });
+      } catch (err) {
+        this._alertDet[id] = { error: `Couldn't load more from Cirrus: ${err?.message || err}` };
+      }
+    }
+    this._render();
   }
 
   async _ackAlerts(ids) {
@@ -3055,6 +3139,12 @@ class OvCirrusNetworkMap extends HTMLElement {
       this._showAcked = ev.target.checked;
       this._render();
     });
+    root.querySelectorAll("tr.alertrow[data-alert]").forEach((tr) =>
+      tr.addEventListener("click", (ev) => {
+        if (ev.target.closest("button, a, input, label")) return;
+        this._toggleAlert(tr.dataset.alert);
+      })
+    );
     root.querySelectorAll("[data-ack]").forEach((b) =>
       b.addEventListener("click", () => this._ackAlerts([b.dataset.ack]))
     );
@@ -3296,6 +3386,20 @@ const STYLE = `
     border:1px solid var(--divider-color); background:none; color:var(--secondary-text-color); cursor:pointer; --mdc-icon-size:18px; }
   .listview .ackbtn:hover:not([disabled]) { color:var(--primary-color); border-color:var(--primary-color); }
   .listview .ackbtn[disabled] { opacity:.4; cursor:default; }
+  .listview tr.alertrow { cursor:pointer; }
+  .listview tr.alertrow:hover td, .listview tr.alertrow.open td { background:var(--secondary-background-color, rgba(127,127,127,.08)); }
+  .listview tr.alertdetail > td { background:var(--secondary-background-color, rgba(127,127,127,.06)); padding:8px 10px 12px; }
+  .alertdet { display:flex; flex-wrap:wrap; gap:10px; white-space:normal; }
+  .alertdet .adbox { flex:1 1 220px; min-width:0; border:1px solid var(--divider-color); border-radius:8px; padding:8px 10px; background:var(--card-background-color); }
+  .alertdet .adbox.wide { flex-basis:100%; }
+  .alertdet h4 { margin:0 0 6px; font-size:.95em; }
+  .alertdet .adkv { display:grid; grid-template-columns:max-content 1fr; gap:2px 12px; margin-bottom:6px; overflow-wrap:anywhere; }
+  .alertdet .adkv .k { color:var(--secondary-text-color); }
+  .alertdet .adhist { width:100%; border-collapse:collapse; }
+  .alertdet .adhist td { padding:2px 6px 2px 0; border-top:1px solid var(--divider-color); vertical-align:top; }
+  .alertdet .adhist tr.cur td { font-weight:600; }
+  .alertdet .adhist tr.acked td { opacity:.6; }
+  .alertdet .adraw summary { cursor:pointer; color:var(--secondary-text-color); margin-top:4px; }
   .listview .ackd { color:var(--secondary-text-color); --mdc-icon-size:16px; }
   .listbar .muted, .listview .muted { color:var(--secondary-text-color); font-size:12px; }
   .check { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer; }

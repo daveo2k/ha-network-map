@@ -90,7 +90,7 @@ Subnets, pools and reservations come from the UniFi gateway; for routed VLANs th
 
 **UNPs:** if the Cirrus application's user can read UPAM, the map shows a **UNPs** row (Access Role Profiles) next to the VLANs. Click one to highlight the clients UPAM put in it. A client's details show its access role, the VLAN it was given, the policy list, access policy and how it authenticated.
 
-**Alerts** shows Cirrus alerts for the site, newest first, filtered by severity or text, with acknowledged ones hidden unless you ask for them. The *Active alerts* sensor counts the unacknowledged ones, and each new one fires an `ovcirrus_alert` event (`id`, `severity`, `type`, `reason`, `device`, `device_mac`, `client_mac`, `ssid`, `site`, `time`):
+**Alerts** shows Cirrus alerts for the site, newest first, filtered by severity or text, with acknowledged ones hidden unless you ask for them. Click an alert for its details: the device and client as the map knows them, how many other alerts each had this week, and (fetched from Cirrus when you open it, read-only) the alert's category, first/last occurrence, count, firmware and radio, the client's alerts over the last 30 days, and every field Cirrus sent. The *Active alerts* sensor counts the unacknowledged ones, and each new one fires an `ovcirrus_alert` event (`id`, `severity`, `type`, `reason`, `device`, `device_mac`, `client_mac`, `ssid`, `site`, `time`):
 
 ```yaml
 automation:

@@ -136,6 +136,25 @@ class CirrusClient:
                 raise CirrusApiError(f"{path}: {err}") from err
         raise CirrusApiError(f"{path}: retry exhausted")
 
+    async def get_alert_definitions(self, org_id: str) -> list[dict]:
+        """Alert definitions (name, category, severity, enabled) for the organization. Read-only."""
+        data = await self._get(f"/ov/v1/organizations/{org_id}/alerts/definitions", optional=True)
+        return data if isinstance(data, list) else []
+
+    async def get_client_alerts(self, org_id: str, sta_mac: str, days: int = 30) -> list[dict]:
+        """Alerts Cirrus has recorded for one client MAC over the last few days, newest first. Read-only."""
+        now = datetime.now(timezone.utc)
+        iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"  # noqa: E731
+        data = await self._get(
+            f"/ov/v1/organizations/{org_id}/alerts/client",
+            {"staMac": sta_mac, "startDate": iso(now - timedelta(days=days)), "endDate": iso(now),
+             "limit": 100, "offset": 0, "sort": '[{"issuedAt":-1}]'},
+            optional=True,
+        )
+        if isinstance(data, dict):
+            data = data.get("result") or data.get("list") or []
+        return data if isinstance(data, list) else []
+
     async def acknowledge_alerts(self, org_id: str, ids: list[str]) -> None:
         """Acknowledge alerts in Cirrus by id (the same as Acknowledge in the Cirrus Alerts page)."""
         for i in range(0, len(ids), 100):

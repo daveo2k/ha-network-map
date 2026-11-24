@@ -106,6 +106,7 @@ class CirrusData:
     access_error: str | None = None  # why UNP data is missing (e.g. no UPAM rights)
     alerts: list = field(default_factory=list)  # Cirrus alerts, newest first
     alerts_error: str | None = None
+    alerts_raw: dict = field(default_factory=dict)  # alert id -> the record as Cirrus sent it (for the details view)
     ipam: dict = field(default_factory=dict)  # see ipam.build_ipam
     unifi_firewall: dict = field(default_factory=dict)  # raw UniFi firewall parts (see UnifiClient.firewall)
     firewall: dict = field(default_factory=dict)  # see firewall.build
@@ -188,6 +189,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         self._sessions_ok = False  # at least one successful read, so a failure can fall back to it
         self._alerts_ok = False
         self._alerts_warned = False  # warn once, then keep failures at debug level
+        self._alert_defs: tuple[float, list] | None = None  # (fetched at, alert definitions)
         self._cache = CirrusData()
         self._scanning: set[str] = set()
         opts = entry.options
@@ -451,11 +453,12 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         elif isinstance(alerts, Exception):
             (_LOGGER.debug if self._alerts_warned else _LOGGER.warning)("Cirrus alerts read failed: %s", alerts)
             self._alerts_warned = True
-            data.alerts, data.alerts_error = prev.alerts, prev.alerts_error
+            data.alerts, data.alerts_error, data.alerts_raw = prev.alerts, prev.alerts_error, prev.alerts_raw
             if not self._alerts_ok:  # nothing good to show: say so rather than "no alerts"
                 data.alerts_error = f"Could not read alerts from Cirrus: {alerts}"
         else:
             data.alerts = parse_alerts(alerts)
+            data.alerts_raw = {str(r["id"]): r for r in alerts or [] if isinstance(r, dict) and r.get("id")}
             self._alerts_ok = True
 
     async def _update_radios(self, data: CirrusData, prev: CirrusData) -> None:
@@ -996,6 +999,44 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             company_props_error=props_error,
             unifi_site=getattr(self.unifi, "site", None) if self.unifi else None,
         )
+
+    async def async_alert_details(self, alert_id: str) -> dict:
+        """More about one alert for the card's details panel, fetched when it is opened. Read-only GETs:
+        every field Cirrus sent for it, its category from the alert definitions, and the client's other alerts
+        over the last 30 days."""
+        raw = (self.data.alerts_raw if self.data else {}).get(str(alert_id))
+        if raw is None:
+            raise ValueError("That alert is no longer in the list from Cirrus.")
+        out: dict = {"id": str(alert_id), "fields": {}, "category": None, "definition": None,
+                     "client_history": None, "errors": {}}
+        for k, v in raw.items():
+            if v in (None, "", [], {}) or isinstance(v, (dict, list)):
+                continue
+            out["fields"][k] = v
+        now = time.monotonic()
+        if self._alert_defs is None or now - self._alert_defs[0] > 3600:
+            try:
+                self._alert_defs = (now, await self.client.get_alert_definitions(self.org_id))
+            except CirrusError as err:
+                out["errors"]["definitions"] = str(err)
+        if self._alert_defs:
+            tid, name = raw.get("alertTypeId"), raw.get("alertType")
+            d = next((d for d in self._alert_defs[1] if tid and tid in (d.get("alertTypeId"), d.get("id"))), None) or \
+                next((d for d in self._alert_defs[1] if name and d.get("name") == name), None)
+            if d:
+                out["category"] = d.get("category")
+                out["definition"] = {k: d.get(k) for k in ("name", "category", "severity", "isEnabled")}
+        sta = raw.get("staMac")
+        if sta:
+            try:
+                hist = parse_alerts(await self.client.get_client_alerts(self.org_id, sta))
+                out["client_history"] = [
+                    {k: h.get(k) for k in ("id", "time", "severity", "type", "reason", "device", "ssid", "acknowledged")}
+                    for h in hist
+                ]
+            except CirrusError as err:
+                out["errors"]["client_history"] = str(err)
+        return out
 
     async def async_acknowledge_alerts(
         self, ids: list[str] | None = None, alert_type: str | None = None, client_mac: str | None = None

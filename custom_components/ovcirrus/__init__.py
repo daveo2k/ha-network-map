@@ -125,6 +125,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_register_options)
     websocket_api.async_register_command(hass, ws_register_preview)
     websocket_api.async_register_command(hass, ws_register_ping)
+    websocket_api.async_register_command(hass, ws_alert_details)
     _register_services(hass)
     return True
 
@@ -729,3 +730,19 @@ def ws_rates(hass: HomeAssistant, connection: websocket_api.ActiveConnection, ms
             "ranges": coordinator.rates.ranges(),
             "enabled": bool(coordinator.unifi),
         })
+
+
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ovcirrus/alert_details", vol.Required("entry_id"): str, vol.Required("alert_id"): str}
+)
+@websocket_api.async_response
+async def ws_alert_details(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """More about one Cirrus alert, for the card's details panel (read-only)."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    try:
+        connection.send_result(msg["id"], await coordinator.async_alert_details(msg["alert_id"]))
+    except ValueError as err:
+        connection.send_error(msg["id"], "not_found", str(err))
