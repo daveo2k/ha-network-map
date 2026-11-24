@@ -139,7 +139,10 @@ def parse_zone_policies(raw: dict, networks: list[dict], names: dict[str, str]) 
         zones.append(
             {
                 "id": zid,
-                "name": z.get("name") or ZONE_KEY_NAMES.get(z.get("zone_key"), zid),
+                # built-in zones come back as "Dmz", "Vpn": use the proper spelling for those
+                "name": ZONE_KEY_NAMES.get(z.get("zone_key"), z.get("name") or zid)
+                if (z.get("name") or "").lower() in ("", str(z.get("zone_key") or "").lower())
+                else z["name"],
                 "key": z.get("zone_key"),
                 "builtin": bool(z.get("default_zone") or z.get("zone_key")),
                 "networks": zn,

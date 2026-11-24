@@ -897,7 +897,19 @@ class OvCirrusNetworkMap extends HTMLElement {
     } catch (err) {
       this._error = `Cannot load map: ${err.message || err}`;
     }
-    if (!this._editing && !this._drag) this._render();
+    if (this._editing || this._drag) return;
+    // Don't redraw under someone using a dropdown or typing: that would close the list or drop the caret.
+    // The new data is drawn as soon as they leave the field.
+    if (this._userBusy()) {
+      this._dirty = true;
+      return;
+    }
+    this._render();
+  }
+
+  _userBusy() {
+    const a = this.shadowRoot?.activeElement;
+    return !!a && (a.tagName === "SELECT" || a.tagName === "TEXTAREA" || (a.tagName === "INPUT" && !["checkbox", "radio", "button"].includes(a.type)));
   }
 
   // ---------- layout ----------
@@ -1272,6 +1284,21 @@ class OvCirrusNetworkMap extends HTMLElement {
     const panelScroll = prevPanel && this._panelFor === this._selected ? prevPanel.scrollTop : 0;
     const prevMenu = this.shadowRoot.querySelector(".viewmenu");
     const menuScroll = prevMenu ? prevMenu.scrollTop : 0;
+    // The page itself (HA's view / panel) scrolls outside the card: redrawing the card briefly changes its height,
+    // which makes that scroll jump. Remember where every scrolled ancestor was and put it back afterwards.
+    const outer = [];
+    for (let el = this; el; ) {
+      el = el.parentElement || el.getRootNode?.().host || null;
+      if (el && el.scrollTop > 0) outer.push([el, el.scrollTop]);
+    }
+    const docTop = document.scrollingElement?.scrollTop || 0;
+    // Put focus (and the caret) back in the same field after the redraw.
+    const act = this.shadowRoot.activeElement;
+    const actKey = act && [...act.attributes].find((a) => a.name.startsWith("data-") || a.name === "id");
+    const actSel = actKey ? `${act.tagName.toLowerCase()}[${actKey.name}${actKey.value ? `="${CSS.escape(actKey.value)}"` : ""}]` : null;
+    const caret = act && typeof act.selectionStart === "number" ? [act.selectionStart, act.selectionEnd] : null;
+    const keepH = Math.round(this.getBoundingClientRect().height) || 0;
+    if (keepH) this.style.minHeight = `${keepH}px`;
 
     let body = "";
     let W = 0;
@@ -1742,7 +1769,33 @@ class OvCirrusNetworkMap extends HTMLElement {
     this._panelFor = this._selected;
     const menu = this.shadowRoot.querySelector(".viewmenu");
     if (menu && menuScroll) menu.scrollTop = menuScroll;
+    for (const [el, top] of outer) if (el.scrollTop !== top) el.scrollTop = top;
+    if (document.scrollingElement && document.scrollingElement.scrollTop !== docTop) document.scrollingElement.scrollTop = docTop;
+    this.style.minHeight = "";
+    this._dirty = false;
     this._bind();
+    if (actSel) {
+      const el = this.shadowRoot.querySelector(actSel);
+      if (el && el !== this.shadowRoot.activeElement) {
+        el.focus({ preventScroll: true });
+        if (caret && el.setSelectionRange) {
+          try {
+            el.setSelectionRange(caret[0], caret[1]);
+          } catch (e) {
+            // not a text field
+          }
+        }
+      }
+    }
+    if (!this._focusHook) {
+      // a refresh that was held back while a field was in use is drawn once focus leaves the field
+      this._focusHook = true;
+      this.shadowRoot.addEventListener("focusout", () =>
+        setTimeout(() => {
+          if (this._dirty && !this._userBusy() && !this._editing && !this._drag) this._render();
+        }, 0)
+      );
+    }
   }
 
   // ---------- tabs: map, addresses (IPAM), alerts ----------
@@ -2034,7 +2087,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     const anyRules = unps.some((u) => u.policy_list);
     const VERB = { ALLOW: "Allow", BLOCK: "Block", REJECT: "Reject", NONE: "–" };
     const zchip = (zid, label) =>
-      zid ? `<button class="zchip${this._fwZone === zid ? " on" : ""}" data-fwzone="${esc(zid)}" title="Show what this zone may reach">${esc(label || zname[zid] || zid)}</button>` : "";
+      zid ? `<button class="zchip${this._fwSrc === zid && !this._fwDst ? " on" : ""}" data-fwzone="${esc(zid)}" title="Show the rules for traffic from this zone">${esc(label || zname[zid] || zid)}</button>` : "";
     const builtin = (u) => /^(devProf|default)/.test(u.name);
     const nBuiltin = unps.filter(builtin).length;
     const unpRows = unps
@@ -2083,30 +2136,68 @@ class OvCirrusNetworkMap extends HTMLElement {
         if (!c || !c.rules.length) return `<td class="fwcell none">–</td>`;
         const cls = c.verdict === "ALLOW" ? "allow" : c.return_only ? "ret" : c.verdict === "NONE" ? "none" : "block";
         const label = c.verdict === "ALLOW" ? "Allow" : c.return_only ? "Return only" : VERB[c.verdict] || c.verdict;
-        const sel = this._fwCell === `${src}|${dst}`;
-        return `<td class="fwcell ${cls}${sel ? " sel" : ""}"><button data-fwcell="${esc(src)}|${esc(dst)}" title="${c.rules.length} rule${c.rules.length === 1 ? "" : "s"}">${label}${c.exceptions ? `<small>${c.exceptions} exception${c.exceptions === 1 ? "" : "s"}</small>` : ""}</button></td>`;
+        const sel = this._fwSrc === src && this._fwDst === dst;
+        const dim = (this._fwSrc && this._fwSrc !== src) || (this._fwDst && this._fwDst !== dst);
+        return `<td class="fwcell ${cls}${sel ? " sel" : ""}${dim ? " dim" : ""}"><button data-fwcell="${esc(src)}|${esc(dst)}" title="${c.rules.length} rule${c.rules.length === 1 ? "" : "s"}">${label}${c.exceptions ? `<small>${c.exceptions} exception${c.exceptions === 1 ? "" : "s"}</small>` : ""}</button></td>`;
       };
-      const rowsZ = this._fwZone ? zones.filter((z) => z.id === this._fwZone) : zones;
+      const rowsZ = zones;
       const matrix = `<div class="fwscroll"><table class="fwmatrix"><thead><tr><th class="corner">From ↓ · To →</th>${zones.map((z) => `<th>${esc(z.name)}</th>`).join("")}</tr></thead><tbody>${rowsZ
         .map((z) => `<tr><th>${esc(z.name)}</th>${zones.map((d) => cell(z.id, d.id)).join("")}</tr>`)
-        .join("")}</tbody></table></div>${this._fwZone ? `<button class="vchip clear" data-fwzone="">Show all zones</button>` : ""}`;
+        .join("")}</tbody></table></div>`;
       const zoneList = `<div class="fwzones">${zones
         .map((z) => `<div><b>${esc(z.name)}</b> ${z.networks.length ? z.networks.map((n) => `${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span>` : ""}${esc(n.name)}`).join(", ") : `<span class="muted">${z.key === "external" ? "internet / WAN" : z.key === "gateway" ? "the gateway itself" : "no networks"}</span>`}</div>`)
         .join("")}</div>`;
-      let detail = "";
-      if (this._fwCell) {
-        const [src, dst] = this._fwCell.split("|");
-        const ids = fw.matrix?.[src]?.[dst]?.rules || [];
-        const all = (fw.policies || []).filter((p) => p.src_zone === src && p.dst_zone === dst).sort((a, b) => a.index - b.index);
-        detail = `<div class="sublabel">${esc(zname[src] || src)} → ${esc(zname[dst] || dst)}: rules in the order the gateway checks them</div>
-          <table class="iptable fwtable"><thead><tr><th>#</th><th>Rule</th><th>Action</th><th>From</th><th>To</th><th>Protocol</th></tr></thead><tbody>${all
-            .map((p, i) => `<tr class="${p.enabled ? "" : "off"}${p.predefined ? " builtin" : ""}"><td class="num">${i + 1}</td>
+      const zopt = (sel) => `<option value="">Any zone</option>` + zones.map((z) => `<option value="${esc(z.id)}"${sel === z.id ? " selected" : ""}>${esc(z.name)}</option>`).join("");
+      const q = (this._fwText || "").trim().toLowerCase();
+      const filtering = !!(this._fwSrc || this._fwDst || q || this._fwCustom);
+      const match = (p) =>
+        (!this._fwSrc || p.src_zone === this._fwSrc) && (!this._fwDst || p.dst_zone === this._fwDst) && (!this._fwCustom || !p.predefined) &&
+        (!q || [p.name, p.description, p.src, p.dst, p.protocol, p.action, p.state].join(" ").toLowerCase().includes(q));
+      const hits = filtering ? (fw.policies || []).filter(match) : [];
+      const groups = new Map();
+      hits.forEach((p) => {
+        const k = `${p.src_zone}|${p.dst_zone}`;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(p);
+      });
+      const order = new Map(zones.map((z, i) => [z.id, i]));
+      const keys = [...groups.keys()].sort((a, b) => {
+        const [a1, a2] = a.split("|"), [b1, b2] = b.split("|");
+        return (order.get(a1) ?? 99) - (order.get(b1) ?? 99) || (order.get(a2) ?? 99) - (order.get(b2) ?? 99);
+      });
+      const ruleRow = (p) => `<tr class="${p.enabled ? "" : "off"}${p.predefined ? " builtin" : ""}"><td class="num">${p.pos}</td>
               <td>${esc(p.name)}${p.predefined ? ` <span class="pill">built-in</span>` : ""}${p.enabled ? "" : ` <span class="pill">off</span>`}${p.logging ? ` <span class="pill">logged</span>` : ""}${p.schedule !== "ALWAYS" ? ` <span class="pill">scheduled</span>` : ""}${p.description ? `<div class="muted">${esc(p.description)}</div>` : ""}</td>
               <td><span class="pill fw ${p.action.toLowerCase()}">${esc(VERB[p.action] || p.action)}</span>${p.state ? `<div class="muted">${esc(p.state)}</div>` : ""}</td>
-              <td>${esc(p.src)}</td><td>${esc(p.dst)}</td><td>${esc(p.protocol || "any")}${p.ip_version && p.ip_version !== "BOTH" ? ` <span class="muted">${esc(p.ip_version)}</span>` : ""}</td></tr>`)
-            .join("")}</tbody></table>${ids.length ? "" : `<div class="muted">No rules between these zones.</div>`}`;
-      }
-      fwBody = `<div class="fwnote muted">Each cell is what the gateway does with new traffic from the row's zone to the column's zone. “Return only” means replies to traffic the other side started are let back in. Click a cell for the rules behind it.</div>${matrix}${zoneList}${detail}`;
+              <td>${esc(p.src)}</td><td>${esc(p.dst)}</td><td>${esc(p.protocol || "any")}${p.ip_version && p.ip_version !== "BOTH" ? ` <span class="muted">${esc(p.ip_version)}</span>` : ""}</td></tr>`;
+      const filterBar = `<div class="fwfilter">
+          <label>From<select data-fwsrc>${zopt(this._fwSrc)}</select></label>
+          <span class="arrow">→</span>
+          <label>To<select data-fwdst>${zopt(this._fwDst)}</select></label>
+          <input type="search" class="filter" data-fwtext placeholder="Filter rules: name, address, port…" value="${esc(this._fwText || "")}">
+          <label class="check"><input type="checkbox" data-fwcustom ${this._fwCustom ? "checked" : ""}> Your rules only</label>
+          ${filtering ? `<button class="act ghost" data-fwclear>Clear</button>` : ""}
+          <span class="muted">${filtering ? `${hits.length} rule${hits.length === 1 ? "" : "s"}` : "Pick zones, or click a cell above"}</span></div>`;
+      const detail = !filtering
+        ? ""
+        : keys.length
+          ? keys
+              .map((k) => {
+                const [src, dst] = k.split("|");
+                // position = where the rule sits in the gateway's full order for this zone pair
+                const full = (fw.policies || []).filter((p) => p.src_zone === src && p.dst_zone === dst).sort((a, b) => a.index - b.index);
+                const pos = new Map(full.map((p, i) => [p.id, i + 1]));
+                const c = fw.matrix?.[src]?.[dst] || {};
+                const verdict = c.verdict === "ALLOW" ? "allow" : c.return_only ? "return only" : (VERB[c.verdict] || "").toLowerCase();
+                return `<div class="sublabel">${esc(zname[src] || src)} → ${esc(zname[dst] || dst)}${verdict ? ` <span class="muted">· otherwise ${esc(verdict)}</span>` : ""}</div>
+                  <table class="iptable fwtable"><thead><tr><th>#</th><th>Rule</th><th>Action</th><th>From</th><th>To</th><th>Protocol</th></tr></thead><tbody>${groups
+                    .get(k)
+                    .sort((a, b) => a.index - b.index)
+                    .map((p) => ruleRow({ ...p, pos: pos.get(p.id) }))
+                    .join("")}</tbody></table>`;
+              })
+              .join("")
+          : `<div class="muted fwnote">No rules match.</div>`;
+      fwBody = `<div class="fwnote muted">Each cell is what the gateway does with new traffic from the row's zone to the column's zone. “Return only” means replies to traffic the other side started are let back in. Click a cell, or use the filter, for the rules behind it (# is the order the gateway checks them in).</div>${matrix}${zoneList}${filterBar}<div class="fwrules">${detail}</div>`;
     } else if (fw.model === "legacy" || (fw.rules || []).length) {
       const sets = {};
       (fw.rules || []).forEach((r) => (sets[r.ruleset] = sets[r.ruleset] || []).push(r));
@@ -2981,21 +3072,44 @@ class OvCirrusNetworkMap extends HTMLElement {
       this._unpBuiltin = ev.target.checked;
       this._render();
     });
+    const fwShow = () => this._render();
     root.querySelectorAll("[data-fwcell]").forEach((b) =>
       b.addEventListener("click", () => {
-        this._fwCell = this._fwCell === b.dataset.fwcell ? null : b.dataset.fwcell;
-        this._render();
-        if (this._fwCell) this.shadowRoot.querySelector(".fwbody .sublabel")?.scrollIntoView({ block: "nearest" });
+        const [src, dst] = b.dataset.fwcell.split("|");
+        const same = this._fwSrc === src && this._fwDst === dst;
+        this._fwSrc = same ? "" : src;
+        this._fwDst = same ? "" : dst;
+        fwShow();
       })
     );
     root.querySelectorAll("[data-fwzone]").forEach((b) =>
       b.addEventListener("click", () => {
-        this._fwZone = b.dataset.fwzone || null;
-        this._fwCell = null;
-        this._render();
-        if (this._fwZone) this.shadowRoot.querySelector(".fwmatrix")?.scrollIntoView({ block: "nearest" });
+        this._fwSrc = b.dataset.fwzone || "";
+        this._fwDst = "";
+        fwShow();
       })
     );
+    root.querySelector("[data-fwsrc]")?.addEventListener("change", (ev) => {
+      this._fwSrc = ev.target.value;
+      this._render();
+    });
+    root.querySelector("[data-fwdst]")?.addEventListener("change", (ev) => {
+      this._fwDst = ev.target.value;
+      this._render();
+    });
+    root.querySelector("[data-fwcustom]")?.addEventListener("change", (ev) => {
+      this._fwCustom = ev.target.checked;
+      this._render();
+    });
+    root.querySelector("[data-fwclear]")?.addEventListener("click", () => {
+      this._fwSrc = this._fwDst = this._fwText = "";
+      this._fwCustom = false;
+      this._render();
+    });
+    root.querySelector("[data-fwtext]")?.addEventListener("input", (ev) => {
+      this._fwText = ev.target.value;
+      this._render();
+    });
     root.querySelector("[data-regform]")?.addEventListener("submit", (ev) => {
       ev.preventDefault();
       this._regPreview();
@@ -3196,6 +3310,14 @@ const STYLE = `
   .fwcell.ret { background:color-mix(in srgb, var(--warning-color,#ffa600) 18%, transparent); }
   .fwcell.none { color:var(--secondary-text-color); }
   .fwcell.sel { outline:2px solid var(--primary-color); outline-offset:-2px; }
+  .fwcell.dim { opacity:.35; }
+  .fwfilter { display:flex; flex-wrap:wrap; align-items:end; gap:8px 10px; margin:10px 0 4px; padding:8px 10px; border:1px solid var(--divider-color); border-radius:8px; font-size:12.5px; }
+  .fwfilter label:not(.check) { display:grid; gap:2px; font-size:12px; color:var(--secondary-text-color); }
+  .fwfilter select, .fwfilter .filter { font:inherit; font-size:13px; padding:5px 7px; border-radius:6px; border:1px solid var(--divider-color); background:var(--card-background-color); color:var(--primary-text-color); }
+  .fwfilter .filter { min-width:200px; flex:1; }
+  .fwfilter .arrow { padding-bottom:6px; color:var(--secondary-text-color); }
+  .fwfilter .act { margin:0; }
+  .fwfilter .check { padding-bottom:6px; }
   .fwzones { display:grid; gap:3px; font-size:12.5px; margin:4px 0 6px; }
   .pill.fw.allow { border-color:#30a46c; color:#30a46c; }
   .pill.fw.block, .pill.fw.reject, .pill.fw.drop { border-color:var(--error-color,#db4437); color:var(--error-color,#db4437); }
