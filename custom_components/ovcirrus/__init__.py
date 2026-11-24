@@ -122,6 +122,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_set_photo)
     websocket_api.async_register_command(hass, ws_restore)
     websocket_api.async_register_command(hass, ws_ack_alerts)
+    websocket_api.async_register_command(hass, ws_register_options)
+    websocket_api.async_register_command(hass, ws_register_preview)
+    websocket_api.async_register_command(hass, ws_register_ping)
     _register_services(hass)
     return True
 
@@ -647,6 +650,58 @@ async def ws_ack_alerts(hass: HomeAssistant, connection: websocket_api.ActiveCon
         connection.send_error(msg["id"], "cirrus_error", str(err))
         return
     connection.send_result(msg["id"], {"acknowledged": n})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "ovcirrus/register_options", vol.Required("entry_id"): str})
+@callback
+def ws_register_options(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Networks (with free addresses) and UNPs for the device registration form."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    connection.send_result(msg["id"], coordinator.registration_options())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ovcirrus/register_ping", vol.Required("entry_id"): str, vol.Required("network_id"): str}
+)
+@websocket_api.async_response
+async def ws_register_ping(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Ping sweep of the addresses the registration form offers as free in one network (sends pings only)."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    try:
+        connection.send_result(msg["id"], await coordinator.async_ping_sweep(msg["network_id"]))
+    except (RuntimeError, ValueError) as err:
+        connection.send_error(msg["id"], "ping_failed", str(err))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "ovcirrus/register_preview",
+        vol.Required("entry_id"): str,
+        vol.Optional("name", default=""): str,
+        vol.Optional("mac", default=""): str,
+        vol.Optional("network_id"): vol.Any(None, str),
+        vol.Optional("ip"): vol.Any(None, str),
+        vol.Optional("unp"): vol.Any(None, str),
+    }
+)
+@websocket_api.async_response
+async def ws_register_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Preview of registering a device (UniFi reservation + Cirrus UNP). Changes nothing."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    req = {k: msg.get(k) for k in ("name", "mac", "network_id", "ip", "unp")}
+    connection.send_result(msg["id"], await coordinator.async_registration_preview(req))
 
 
 @websocket_api.websocket_command(

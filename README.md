@@ -119,6 +119,14 @@ data:
 
 UNPs and alerts need the Cirrus application's user to have read access to UPAM and alerts; acknowledging needs write access to alerts. Without it, the integration keeps working and the card says what is missing.
 
+### Register a device (preview)
+
+**Register device** (Addresses tab, or **Register device…** on a selected device) works out what registering a device would do: a fixed IP from the UniFi gateway's DHCP (a reservation) and a Cirrus UNP for its MAC, plus a CoA if it is online in another UNP. It shows every request it would send and anything that would stop it. **It changes nothing yet**: writing is a later step.
+
+The free addresses offered are ones UniFi and Cirrus know nothing about. **Check free addresses (ping)** pings them all from the Home Assistant host (and reads its ARP table, which also catches devices that drop pings on HA's own subnets) and drops any that answer; Preview pings the chosen address too. A few addresses known to be up are pinged as a check, so if the gateway's firewall blocks pings from HA to that network the form says the result proves nothing.
+
+> **Firewall:** the ping check only works if the Home Assistant host may send ICMP (ping) to the network being checked. On a UniFi gateway, add a firewall rule allowing ICMP from HA's IP address to each network you register devices on (and the replies back), or the check reports that it proves nothing.
+
 ## Device identification
 
 Every client, including ones the integration has never seen before, is identified live from:

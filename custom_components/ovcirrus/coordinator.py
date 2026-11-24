@@ -68,6 +68,7 @@ from .discovery import discover, full_scan
 from .dns import ReverseResolver, parse_servers
 from .identify import HaDevice, identify, is_private_mac
 from .ipam import Reservation, Sighting, build_ipam, merge_networks, parse_cirrus_interfaces, parse_unifi_networks
+from . import probe, registration
 from .mac_table import SshError, SwitchTables, fetch_switch_tables, norm_mac
 from .store import EntryStore
 from .topology import MapExtras, build_site_map, model_slug, walk_nodes
@@ -710,7 +711,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         """Subnets, DHCP pools, reservations and every address in use (see ipam.py)."""
         try:
             networks = merge_networks(
-                parse_unifi_networks(data.unifi_networks), parse_cirrus_interfaces(data.ip_interfaces, data.vlans)
+                parse_unifi_networks(data.unifi_networks), parse_cirrus_interfaces(data.ip_interfaces, data.vlans), data.vlans
             )
         except Exception:  # noqa: BLE001 - never let IPAM break polling
             _LOGGER.exception("Could not read the network list for the address view")
@@ -787,6 +788,65 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 if node.get("mac") and self.store.is_new(node["mac"]):
                     node["is_new"] = True
             site_map["summary"]["new_devices"] = len(self.store.recent_new())
+
+    def registration_options(self) -> dict:
+        """Networks with free addresses and the UNPs, for the registration form."""
+        if not self.data:
+            return {"networks": [], "unps": []}
+        return registration.options(self.data.ipam, self.data.unps)
+
+    def _ipam_net(self, network_id: str | None) -> dict | None:
+        return next((n for n in (self.data.ipam or {}).get("networks") or [] if n["id"] == network_id), None) if self.data else None
+
+    @staticmethod
+    def _controls(net: dict) -> list[str]:
+        """Addresses in a network known to be up right now (gateway + a few online devices): if none of them
+        answer a ping either, silence from a free address proves nothing."""
+        online = [a["ip"] for a in net.get("addresses") or [] if a.get("online")]
+        return [x for x in [net.get("gateway"), *online[:6]] if x]
+
+    async def async_ping_sweep(self, network_id: str) -> dict:
+        """Ping every address the registration form offers as free in a network (read-only)."""
+        net = self._ipam_net(network_id)
+        if not net:
+            raise ValueError("Unknown network")
+        free = registration.free_addresses(net)
+        res = await probe.probe([*free["pool"], *free["other"]], self._controls(net))
+        res["network_id"] = network_id
+        return res
+
+    async def async_registration_preview(self, req: dict) -> dict:
+        """What registering a device would change. Reads only (company properties are fetched fresh)."""
+        if not self.data:
+            return {"ok": False, "errors": ["No data from Cirrus yet."], "warnings": [], "notes": [], "changes": []}
+        props, props_error = None, None
+        try:
+            props = await self.client.get_company_properties(self.org_id)
+        except CirrusError as err:
+            props_error = str(err)
+        online = {
+            mac: {"ip": c.get("ip"), "name": c.get("name") or c.get("hostname")}
+            for mac, c in ((self.data.unifi or {}).get("clients") or {}).items()
+        }
+        ping = None
+        net = self._ipam_net(req.get("network_id"))
+        if net and req.get("ip") and net.get("source") == "UniFi":
+            try:
+                ping = await probe.probe([str(req["ip"]).strip()], self._controls(net))
+            except (RuntimeError, ValueError) as err:
+                ping = {"error": str(err)}
+        return registration.build_preview(
+            req,
+            ping=ping,
+            ipam=self.data.ipam,
+            unps=self.data.unps,
+            known=self.data.unifi_known,
+            online=online,
+            sessions=self.data.sessions,
+            company_props=props,
+            company_props_error=props_error,
+            unifi_site=getattr(self.unifi, "site", None) if self.unifi else None,
+        )
 
     async def async_acknowledge_alerts(
         self, ids: list[str] | None = None, alert_type: str | None = None, client_mac: str | None = None

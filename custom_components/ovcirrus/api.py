@@ -260,6 +260,27 @@ class CirrusClient:
                 return rows
             offset += PAGE_SIZE
 
+    async def get_company_properties(self, org_id: str) -> list[dict]:
+        """UPAM company properties (MAC -> device name, Access Role Profile). Read-only."""
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            page = await self._get(
+                f"/ov/v1/organizations/{org_id}/am/accounts/company-properties",
+                {"limit": PAGE_SIZE, "offset": offset},
+                optional=True,
+            ) or {}
+            if isinstance(page, list):
+                batch = page
+            elif isinstance(page, dict):
+                batch = page.get("list") or page.get("result") or page.get("data") or []
+            else:
+                batch = []
+            rows.extend(batch)
+            if len(batch) < PAGE_SIZE or offset > 20000:
+                return rows
+            offset += PAGE_SIZE
+
     async def get_alerts(self, org_id: str, site_ids: list[str], days: int = 7) -> list[dict]:
         """Alerts for the chosen sites from the last few days (acknowledged ones included).
 

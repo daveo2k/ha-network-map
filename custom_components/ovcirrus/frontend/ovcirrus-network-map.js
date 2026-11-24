@@ -240,6 +240,13 @@ function linkLoad(rx, tx, speed) {
 }
 // Text after a link label for the gateway's end of a cable: its port name and live traffic, seen from the
 // device further from the Internet: ↓ = gateway sending to it, ↑ = gateway receiving from it.
+function ipInCidr(ip, cidr) {
+  const toInt = (a) => a.split(".").reduce((x, o) => x * 256 + Number(o), 0);
+  const [base, bits] = String(cidr || "").split("/");
+  if (!ip || !base || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return false;
+  const size = 2 ** (32 - Number(bits));
+  return Math.floor(toInt(ip) / size) === Math.floor(toInt(base) / size);
+}
 function peerText(peer) {
   if (!peer) return "";
   const rate = peer.up ? `↓${fmtRate(peer.tx)} ↑${fmtRate(peer.rx)}` : "down";
@@ -1617,11 +1624,14 @@ class OvCirrusNetworkMap extends HTMLElement {
       : "";
     const canAdd = this._isAdmin && sel && ["wired", "endpoint", "bridge"].includes(sel.kind) && (sel.ip || sel.mac);
     const deviceActions =
-      this._isAdmin && sel?.kind === "manual"
+      (this._isAdmin && sel?.kind === "manual"
         ? `<button class="act ghost" data-devedit>Edit device</button>`
         : canAdd
         ? `<button class="act ghost" data-devpromote>Add to map as a device</button>`
-        : "";
+        : "") +
+      (this._isAdmin && sel?.mac && ["wireless", "wired", "manual", "endpoint", "bridge"].includes(sel.kind)
+        ? `<button class="act ghost" data-register title="Fixed IP from the gateway's DHCP and a Cirrus UNP (preview)">Register device…</button>`
+        : "");
     const speedBlock =
       sel?.kind === "internet" && this._speed?.length
         ? `<div class="section"><div class="sublabel">Speed test</div><table>${this._speed
@@ -1867,12 +1877,153 @@ class OvCirrusNetworkMap extends HTMLElement {
     const other = ipam.other || [];
     return `<div class="listbar"><input type="search" class="filter" data-filter="ip" placeholder="Filter by address, name or MAC" value="${esc(this._ipFilter || "")}">
         <label class="check"><input type="checkbox" data-showfree ${this._showFree ? "checked" : ""}> Show free addresses</label>
+        ${this._isAdmin && !this._reg ? `<button class="act" data-regopen>Register device</button>` : ""}
         <span class="muted">Read-only. Subnets and pools from ${nets.some((n) => n.source === "UniFi") ? "the UniFi gateway" : "Cirrus"}; addresses from every source the map uses.</span></div>
-      ${nets.map(section).join("")}${
+      ${this._reg ? this._regPanel() : ""}${nets.map(section).join("")}${
         other.length
           ? `<section class="net"><div class="nethead static"><b>Other private addresses</b><span class="muted">not in any known subnet</span></div><table class="iptable">${IP_COLS}<tbody>${other.map(row).join("")}</tbody></table></section>`
           : ""
       }`;
+  }
+
+  // ---------- device registration (preview only: nothing is changed in UniFi or Cirrus) ----------
+  async _openRegister(prefill = {}) {
+    const site = this._sites?.[this._siteIdx];
+    if (!site) return;
+    this._reg = { form: { name: "", mac: "", network_id: "", ip: "", unp: "", ...prefill }, opts: null, preview: null, busy: true, err: null, sweep: {}, sweeping: false };
+    this._setTab("ip");
+    this._render();
+    try {
+      this._reg.opts = await this._hass.callWS({ type: "ovcirrus/register_options", entry_id: site.entry_id });
+    } catch (err) {
+      this._reg.err = `Could not load networks and UNPs: ${err?.message || err}`;
+    }
+    const f = this._reg.form, nets = this._reg.opts?.networks || [];
+    if (!f.network_id && prefill.current_ip) f.network_id = nets.find((n) => ipInCidr(prefill.current_ip, n.cidr))?.id || "";
+    if (!f.network_id && nets.length === 1) f.network_id = nets[0].id;
+    if (!f.ip) f.ip = this._regDefaultIp();
+    this._reg.busy = false;
+    this._render();
+    this.shadowRoot.querySelector(".regpanel")?.scrollIntoView({ block: "nearest" });
+  }
+
+  _regNet() {
+    return (this._reg?.opts?.networks || []).find((n) => n.id === this._reg.form.network_id);
+  }
+
+  // Keep the device's current address if it is in the chosen network, else the first free one in the pool.
+  _regDefaultIp() {
+    const n = this._regNet(), f = this._reg.form;
+    if (!n) return "";
+    if (f.current_ip && ipInCidr(f.current_ip, n.cidr)) return f.current_ip;
+    const used = this._reg.sweep?.[n.id]?.in_use || {};
+    return n.free_pool.find((ip) => !used[ip]) || n.free_other.find((ip) => !used[ip]) || "";
+  }
+
+  // Ping every address offered as free in the chosen network (from the HA host; read-only).
+  async _regSweep() {
+    const site = this._sites?.[this._siteIdx], n = this._regNet();
+    if (!site || !n || this._reg.sweeping) return;
+    this._reg.sweeping = true;
+    this._reg.err = null;
+    this._render();
+    try {
+      const res = await this._hass.callWS({ type: "ovcirrus/register_ping", entry_id: site.entry_id, network_id: n.id });
+      this._reg.sweep[n.id] = { ...res, at: Date.now() };
+      if (res.in_use[this._reg.form.ip] && this._reg.form.ip !== this._reg.form.current_ip) {
+        this._reg.form.ip = this._regDefaultIp();
+        this._reg.preview = null;
+      }
+    } catch (err) {
+      this._reg.err = `Ping check failed: ${err?.message || err}`;
+    }
+    this._reg.sweeping = false;
+    this._render();
+  }
+
+  _regPanel() {
+    const r = this._reg, f = r.form, o = r.opts || { networks: [], unps: [] };
+    const n = this._regNet();
+    const opt = (v, label, sel) => `<option value="${esc(v)}"${sel ? " selected" : ""}>${esc(label)}</option>`;
+    const nets = o.networks.map((x) => opt(x.id, `${x.name}${x.vlan ? ` · VLAN ${x.vlan}` : ""} · ${x.cidr}`, x.id === f.network_id)).join("");
+    let ips = "", sweepLine = "";
+    if (n) {
+      const sw = r.sweep[n.id], used = sw?.in_use || {};
+      const pool = n.free_pool.filter((ip) => !used[ip]), other = n.free_other.filter((ip) => !used[ip]);
+      const busyIps = Object.keys(used).filter((ip) => ip !== f.current_ip);
+      const extra = f.ip && !pool.includes(f.ip) && !other.includes(f.ip) && !busyIps.includes(f.ip) ? f.ip : null;
+      const tag = sw ? " · ping-checked" : "";
+      ips =
+        (extra ? `<optgroup label="Current">${opt(extra, extra === f.current_ip ? `${extra} (its address now)` : extra, true)}</optgroup>` : "") +
+        (pool.length ? `<optgroup label="Free in the DHCP pool (${pool.length}${n.free_pool.length >= 256 ? "+" : ""}${tag})">${pool.map((ip) => opt(ip, ip, ip === f.ip)).join("")}</optgroup>` : "") +
+        (other.length ? `<optgroup label="Free outside the pool${tag}">${other.map((ip) => opt(ip, ip, ip === f.ip)).join("")}</optgroup>` : "") +
+        (busyIps.length
+          ? `<optgroup label="Answered a ping: in use">${busyIps
+              .map((ip) => `<option value="${esc(ip)}" disabled>${esc(ip)}${used[ip].mac ? ` · ${esc(used[ip].mac)}` : ""}</option>`)
+              .join("")}</optgroup>`
+          : "");
+      if (r.sweeping) sweepLine = `<span class="muted">Pinging ${n.free_pool.length + n.free_other.length} addresses… (takes up to ~20 s)</span>`;
+      else if (sw) {
+        const blocked = sw.control.tried && !sw.control.answered;
+        const nUsed = Object.keys(used).length;
+        sweepLine = blocked
+          ? `<span class="regwarn">Pinged ${sw.checked} addresses, but none of the ${sw.control.tried} addresses known to be up answered either: pings from Home Assistant look blocked on ${esc(n.name)}, so this proves nothing. Allow ICMP (ping) from the Home Assistant host to this network in the gateway's firewall.</span>`
+          : `<span class="muted">Pinged ${sw.checked} addresses ${new Date(sw.at).toLocaleTimeString()}: <b>${nUsed}</b> answered and ${nUsed === 1 ? "is" : "are"} taken out of the free list (${sw.control.answered}/${sw.control.tried} known-up addresses answered as a check).</span>`;
+      } else sweepLine = `<span class="muted">“Free” means UniFi and Cirrus know nothing on it. A device with a static address they never saw would not show. The ping check needs the gateway's firewall to let the Home Assistant host ping this network.</span>`;
+    }
+    const unps =
+      opt("", "— none: leave Cirrus as it is —", !f.unp) +
+      o.unps.map((u) => opt(u.name, `${u.name}${u.vlans.length ? ` · VLAN ${u.vlans.join(", ")}` : ""}`, u.name === f.unp)).join("");
+    const pv = r.preview;
+    const SYS = { UniFi: "mdi:router-network", Cirrus: "mdi:cloud-outline" };
+    const ACT = { create: "Create", update: "Update", coa: "Apply now" };
+    const result = pv
+      ? `<div class="regresult">
+          ${pv.errors.length ? `<div class="regmsgs bad"><b>Would not register:</b><ul>${pv.errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+          ${pv.warnings.length ? `<div class="regmsgs warn"><ul>${pv.warnings.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+          ${pv.changes.length ? `<div class="sublabel">What registering would change</div><ol class="regsteps">${pv.changes
+            .map(
+              (c) => `<li><div class="rshead"><ha-icon icon="${SYS[c.system] || "mdi:cog"}"></ha-icon><b>${esc(c.system)}</b><span class="pill">${esc(ACT[c.action] || c.action)}</span>${esc(c.title)}</div>
+                ${(c.details || []).map((d) => `<div class="muted">${esc(d)}</div>`).join("")}
+                <details><summary>Request</summary><pre>${esc(c.request.method)} ${esc(c.request.path)}\n${esc(JSON.stringify(c.request.body, null, 2))}</pre></details></li>`
+            )
+            .join("")}</ol>` : ""}
+          ${pv.notes.length ? `<ul class="regnotes">${pv.notes.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
+        </div>`
+      : "";
+    return `<section class="regpanel"><div class="reghead"><b>Register a device</b><span class="pill">Preview only</span>
+        <span class="muted">Nothing is changed in UniFi or Cirrus yet: this shows exactly what a registration would do.</span>
+        <button class="act ghost" data-regclose>Close</button></div>
+      ${r.err ? `<div class="formerr">${esc(r.err)}</div>` : ""}
+      <form class="regform" data-regform>
+        <label>Name<input data-reg="name" value="${esc(f.name)}" placeholder="e.g. Front door camera" required></label>
+        <label>MAC address<input data-reg="mac" class="mono" value="${esc(f.mac)}" placeholder="60:74:F4:EA:F6:8E" required></label>
+        <label>Network<select data-reg="network_id">${f.network_id ? "" : opt("", r.busy ? "Loading…" : "Pick a network", true)}${nets}</select></label>
+        <label>Fixed IP (DHCP reservation)<select data-reg="ip" ${n ? "" : "disabled"}>${ips || opt("", n ? "No free addresses" : "Pick a network first", true)}</select></label>
+        <label>UNP (Cirrus access role)<select data-reg="unp">${unps}</select></label>
+        ${n ? `<div class="regsweep"><button class="act ghost" type="button" data-regsweep ${r.sweeping ? "disabled" : ""} title="Ping every free address from Home Assistant and drop the ones that answer">${r.sweeping ? "Pinging…" : "Check free addresses (ping)"}</button>${sweepLine}</div>` : ""}
+        <div class="row"><button class="act" type="submit" ${r.busy ? "disabled" : ""}>${r.busy ? "Checking…" : "Preview"}</button></div>
+      </form>${result}</section>`;
+  }
+
+  async _regPreview() {
+    const site = this._sites?.[this._siteIdx];
+    if (!site || !this._reg) return;
+    const f = this._reg.form;
+    this._reg.busy = true;
+    this._reg.err = null;
+    this._render();
+    try {
+      this._reg.preview = await this._hass.callWS({
+        type: "ovcirrus/register_preview", entry_id: site.entry_id,
+        name: f.name || "", mac: f.mac || "", network_id: f.network_id || null, ip: f.ip || null, unp: f.unp || null,
+      });
+    } catch (err) {
+      this._reg.err = `Preview failed: ${err?.message || err}`;
+    }
+    this._reg.busy = false;
+    this._render();
+    this.shadowRoot.querySelector(".regresult")?.scrollIntoView({ block: "nearest" });
   }
 
   _alertsView(site) {
@@ -2691,6 +2842,33 @@ class OvCirrusNetworkMap extends HTMLElement {
         .map((tr) => tr.dataset.alert);
       if (ids.length && confirm(`Acknowledge ${ids.length} alert${ids.length > 1 ? "s" : ""} in Cirrus?`)) this._ackAlerts(ids);
     });
+    root.querySelector("[data-regopen]")?.addEventListener("click", () => this._openRegister());
+    root.querySelector("[data-regclose]")?.addEventListener("click", () => {
+      this._reg = null;
+      this._render();
+    });
+    root.querySelector("[data-register]")?.addEventListener("click", () => {
+      const sel = this._index?.get(this._selected);
+      if (!sel) return;
+      this._selected = null;
+      this._openRegister({ name: sel.name || "", mac: sel.mac || "", current_ip: sel.ip || "" });
+    });
+    root.querySelectorAll("[data-reg]").forEach((el) =>
+      el.addEventListener(el.tagName === "SELECT" ? "change" : "input", () => {
+        if (!this._reg) return;
+        this._reg.form[el.dataset.reg] = el.value;
+        this._reg.preview = null; // stale once anything changes
+        if (el.dataset.reg === "network_id") {
+          this._reg.form.ip = this._regDefaultIp();
+          this._render();
+        } else if (el.tagName === "SELECT") this._render();
+      })
+    );
+    root.querySelector("[data-regsweep]")?.addEventListener("click", () => this._regSweep());
+    root.querySelector("[data-regform]")?.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      this._regPreview();
+    });
     root.querySelectorAll(".lspark[data-port]").forEach((el) => {
       el.title = "";
       el.addEventListener("pointerenter", () => this._showSpark(el));
@@ -2857,6 +3035,31 @@ const STYLE = `
   .listview .ackd { color:var(--secondary-text-color); --mdc-icon-size:16px; }
   .listbar .muted, .listview .muted { color:var(--secondary-text-color); font-size:12px; }
   .check { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer; }
+  .regpanel { margin:10px 16px; padding:12px 14px; border:1px solid var(--primary-color); border-radius:10px; background:var(--card-background-color); font-size:13px; }
+  .reghead { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:8px; }
+  .reghead .act { margin:0 0 0 auto; }
+  .reghead .muted, .regpanel .muted { color:var(--secondary-text-color); font-size:12px; }
+  .regform { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px 12px; align-items:end; }
+  .regform label { display:grid; gap:3px; font-size:12px; color:var(--secondary-text-color); }
+  .regform input, .regform select { font:inherit; font-size:13px; padding:6px 7px; border-radius:6px; border:1px solid var(--divider-color);
+    background:var(--card-background-color); color:var(--primary-text-color); min-width:0; }
+  .regform .row .act { margin:0; }
+  .regsweep { grid-column:1 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:12px; }
+  .regsweep .act { margin:0; }
+  .regwarn { color:var(--warning-color,#ffa600); }
+  .regresult { margin-top:12px; display:grid; gap:8px; }
+  .regmsgs { padding:8px 10px; border-radius:8px; font-size:12.5px; }
+  .regmsgs ul, .regnotes { margin:4px 0 0; padding-left:18px; }
+  .regmsgs.bad { background:color-mix(in srgb, var(--error-color,#db4437) 12%, transparent); color:var(--primary-text-color); }
+  .regmsgs.warn { background:color-mix(in srgb, var(--warning-color,#ffa600) 16%, transparent); color:var(--primary-text-color); }
+  .regsteps { margin:0; padding-left:20px; display:grid; gap:8px; }
+  .regsteps li { padding-left:2px; }
+  .rshead { display:flex; flex-wrap:wrap; align-items:center; gap:6px; --mdc-icon-size:16px; }
+  .rshead .pill { font-size:11px; }
+  .regsteps details summary { cursor:pointer; color:var(--primary-color); font-size:12px; margin-top:2px; }
+  .regsteps pre { margin:4px 0 0; padding:8px; border-radius:6px; background:var(--secondary-background-color, rgba(127,127,127,.1));
+    font-size:11.5px; white-space:pre-wrap; word-break:break-all; }
+  .regnotes { color:var(--secondary-text-color); font-size:12px; }
   .net { border-bottom:1px solid var(--divider-color); }
   .nethead { display:flex; flex-wrap:wrap; align-items:center; gap:8px; width:100%; padding:10px 16px; font:inherit; font-size:13.5px;
     text-align:left; border:0; background:transparent; color:var(--primary-text-color); cursor:pointer; }

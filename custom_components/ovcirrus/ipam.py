@@ -124,8 +124,16 @@ def parse_cirrus_interfaces(rows: list[dict], vlans: dict[str, dict]) -> list[Ne
     return out
 
 
-def merge_networks(unifi: list[Network], cirrus: list[Network]) -> list[Network]:
-    """UniFi wins for a subnet both know; the switch's interface address is kept as extra info."""
+def merge_networks(unifi: list[Network], cirrus: list[Network], vlans: dict[str, dict] | None = None) -> list[Network]:
+    """UniFi wins for a subnet both know; the switch's interface address is kept as extra info.
+
+    The gateway's own LAN is untagged on its side (UniFi calls it VLAN 1) while the switches carry it on a real
+    VLAN: a Cirrus VLAN with the same name as the network gives the id the rest of the network uses.
+    """
+    by_name = {str(v.get("name") or "").strip().lower(): int(k) for k, v in (vlans or {}).items() if str(k).isdigit()}
+    for n in unifi:
+        if n.vlan in (None, 1) and by_name.get(n.name.strip().lower()):
+            n.vlan = by_name[n.name.strip().lower()]
     seen = {n.net: n for n in unifi}
     out = list(unifi)
     for n in cirrus:
