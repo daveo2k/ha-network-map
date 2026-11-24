@@ -102,6 +102,28 @@ class UnifiClient:
         """Every client UniFi remembers, online or not, including fixed-IP reservations (use_fixedip / fixed_ip)."""
         return await self._get(f"/api/s/{self.site}/rest/user") or []
 
+    async def firewall(self) -> dict:
+        """The gateway's firewall, read-only: zone-based policies (Network 9+) or the older rule sets, plus the
+        groups they use, traffic rules and port forwards. Each part is optional; failures are listed in "errors"."""
+        site = self.site
+        parts = {
+            "zones": f"/v2/api/site/{site}/firewall/zone",
+            "policies": f"/v2/api/site/{site}/firewall-policies",
+            "rules": f"/api/s/{site}/rest/firewallrule",
+            "groups": f"/api/s/{site}/rest/firewallgroup",
+            "traffic_rules": f"/v2/api/site/{site}/trafficrules",
+            "port_forwards": f"/api/s/{site}/rest/portforward",
+        }
+        out: dict = {"errors": {}}
+        for key, path in parts.items():
+            try:
+                rows = await self._get(path)
+                out[key] = rows if isinstance(rows, list) else []
+            except UnifiError as err:
+                out[key] = []
+                out["errors"][key] = str(err)
+        return out
+
     async def gateway_ports(self) -> list[dict]:
         """Just the gateway's port table with live rates (for the bandwidth history)."""
         g = parse_gateway([], await self.devices())

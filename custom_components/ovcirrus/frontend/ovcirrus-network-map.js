@@ -562,10 +562,10 @@ class OvCirrusNetworkMap extends HTMLElement {
     }
     this._selected = null;
     this._siteIdx = 0;
-    this._tab = "map"; // map | ip | alerts
+    this._tab = "map"; // map | ip | access | alerts
     try {
       const t = localStorage.getItem(TAB_KEY);
-      if (["map", "ip", "alerts"].includes(t)) this._tab = t;
+      if (["map", "ip", "access", "alerts"].includes(t)) this._tab = t;
     } catch (e) {
       // storage blocked: start on the map
     }
@@ -874,7 +874,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       const res = await this._hass.callWS(msg);
       this._sites = (res.entries || []).flatMap((e) => e.sites.map((s) => ({
         ...s, entry: e.title, entry_id: s.entry_id || e.entry_id, port_names: e.port_names || {},
-        ipam: e.ipam || {}, alerts_error: e.alerts_error || null,
+        ipam: e.ipam || {}, alerts_error: e.alerts_error || null, firewall: e.firewall || {}, unp_details: e.unp_details || [], ssids: e.ssids || [],
         alerts: (e.alerts || []).filter((a) => !a.site_id || !s.site_id || a.site_id === s.site_id),
       })));
       this._isAdmin = !!res.is_admin;
@@ -1702,6 +1702,7 @@ class OvCirrusNetworkMap extends HTMLElement {
           this._error && !site ? `<div class="empty">${esc(this._error)}</div>`
           : this._tab === "ip" ? this._ipamView(site)
           : this._tab === "alerts" ? this._alertsView(site)
+          : this._tab === "access" ? this._accessView(site)
           : body}</div>
         ${this._form ? formBlock : this._tab === "map" ? panel : ""}
       </ha-card>`;
@@ -1754,7 +1755,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     return `<div class="tabs" role="group" aria-label="View">${tab("map", "mdi:graph-outline", "Map")}${tab(
       "ip", "mdi:ip-network-outline", "Addresses",
       conflicts ? `<span class="count bad" title="${conflicts} address conflict${conflicts > 1 ? "s" : ""}">${conflicts}</span>` : ""
-    )}${tab(
+    )}${tab("access", "mdi:shield-lock-outline", "Access")}${tab(
       "alerts", "mdi:alert-outline", "Alerts",
       active.length ? `<span class="count${worst <= 1 ? " bad" : worst <= 3 ? " warnc" : ""}">${active.length}</span>` : ""
     )}</div>`;
@@ -2024,6 +2025,117 @@ class OvCirrusNetworkMap extends HTMLElement {
     this._reg.busy = false;
     this._render();
     this.shadowRoot.querySelector(".regresult")?.scrollIntoView({ block: "nearest" });
+  }
+
+  // ---------- access: Cirrus UNPs and the gateway firewall (read-only) ----------
+  _accessView(site) {
+    const fw = site?.firewall || {}, unps = site?.unp_details || [];
+    const zones = fw.zones || [], zname = Object.fromEntries(zones.map((z) => [z.id, z.name]));
+    const anyRules = unps.some((u) => u.policy_list);
+    const VERB = { ALLOW: "Allow", BLOCK: "Block", REJECT: "Reject", NONE: "–" };
+    const zchip = (zid, label) =>
+      zid ? `<button class="zchip${this._fwZone === zid ? " on" : ""}" data-fwzone="${esc(zid)}" title="Show what this zone may reach">${esc(label || zname[zid] || zid)}</button>` : "";
+    const builtin = (u) => /^(devProf|default)/.test(u.name);
+    const nBuiltin = unps.filter(builtin).length;
+    const unpRows = unps
+      .filter((u) => this._unpBuiltin || !builtin(u) || u.clients)
+      .map(
+        (u) => `<tr><td><b>${esc(u.name)}</b>${u.status && u.status !== "SUCCESSFUL" ? `<div class="muted">${esc(u.status)}</div>` : ""}</td>
+          <td>${(u.assigned || []).map((a) => `<div>${esc(a)}</div>`).join("") || `<span class="muted">not assigned</span>`}</td>
+          <td>${
+            u.networks?.length
+              ? u.networks
+                  .map((n) => `<div title="From ${esc(n.how || "Cirrus")}">${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span> ` : ""}${esc(n.network)} <span class="mono muted">${esc(n.cidr)}</span> ${zchip(n.zone_id, n.zone)}</div>`)
+                  .join("")
+              : u.vlans?.length ? u.vlans.map((v) => `<span class="vchip static" style="--c:${vlanColor(v)}"><i></i>${esc(v)}</span>`).join(" ")
+              : `<span class="muted" title="Cirrus doesn't report the VLAN; it shows once a device is online in this UNP">not known yet</span>`
+          }</td>
+          <td class="num">${u.clients || 0}</td>
+          <td>${[
+            u.policy_list ? `Rules: ${esc(u.policy_list)}` : `<span class="muted">no access rules</span>`,
+            u.captive_portal ? `Captive portal: ${esc(u.captive_portal)}` : "",
+            u.bandwidth ? `Bandwidth: ${esc(Object.values(u.bandwidth).join(" / "))}` : "",
+          ].filter(Boolean).map((x) => `<div>${x}</div>`).join("")}</td></tr>`
+      )
+      .join("");
+    const unpSection = `<section class="net"><div class="nethead static"><ha-icon icon="mdi:badge-account-outline"></ha-icon><b>UNPs (Cirrus access roles)</b><span class="muted">${unps.length} profile${unps.length === 1 ? "" : "s"}</span></div>
+      ${unps.length && !anyRules ? `<div class="fwnote">None of these UNPs has Cirrus access rules (a policy list): each one only picks the VLAN a device lands on. What that VLAN can reach is decided by the gateway's firewall below. Click a zone to see its rules.</div>` : ""}
+      ${nBuiltin ? `<div class="fwnote"><label class="check"><input type="checkbox" data-unpbuiltin ${this._unpBuiltin ? "checked" : ""}> Show Cirrus's ${nBuiltin} built-in profiles (devProf…, default…)</label></div>` : ""}
+      ${unps.length ? `<table class="iptable fwtable"><thead><tr><th>UNP</th><th>Assigned to</th><th>VLAN → network · zone</th><th class="num">Online</th><th>Other settings</th></tr></thead><tbody>${unpRows}</tbody></table>` : `<div class="empty">${esc(site?.access_error || "No UNPs from Cirrus.")}</div>`}</section>`;
+
+    const ssids = site?.ssids || [];
+    const ssidSection = ssids.length
+      ? `<section class="net"><div class="nethead static"><ha-icon icon="mdi:wifi"></ha-icon><b>Wireless networks (SSIDs)</b><span class="muted">as their connected devices show them</span></div>
+        <div class="fwnote">A wireless device whose UNP sets no VLAN (or that has no UNP) lands on its SSID's VLAN: tagged, or untagged on the AP port's native VLAN.</div>
+        <table class="iptable fwtable"><thead><tr><th>SSID</th><th class="num">Devices</th><th>VLAN</th><th>Network · zone</th><th>UNPs in use</th></tr></thead><tbody>${ssids
+          .map((x) => `<tr><td><b>${esc(x.ssid)}</b></td><td class="num">${x.clients}</td>
+            <td>${Object.entries(x.vlans).map(([v, n]) => v === "untagged" ? `<div>untagged <span class="muted">(AP native VLAN) · ${n}</span></div>` : `<div><span class="vchip static" style="--c:${vlanColor(v)}"><i></i>${esc(v)}</span> <span class="muted">${n}</span></div>`).join("")}</td>
+            <td>${x.nets.map((n) => `<div>${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span> ` : ""}${esc(n.network)} <span class="mono muted">${esc(n.cidr)}</span> ${zchip(n.zone_id, n.zone)} <span class="muted">${n.clients}</span></div>`).join("") || `<span class="muted">–</span>`}</td>
+            <td>${Object.entries(x.unps).map(([u, n]) => `<div>${u === "(none)" ? `<span class="muted">no UNP → SSID VLAN</span>` : esc(u)} <span class="muted">${n}</span></div>`).join("")}</td></tr>`)
+          .join("")}</tbody></table></section>`
+      : "";
+    const errs = Object.entries(fw.errors || {});
+    const errLine = errs.length ? `<div class="fwnote muted">Couldn't read from the gateway: ${errs.map(([k, v]) => `${esc(k.replace("_", " "))} (${esc(v)})`).join("; ")}</div>` : "";
+    let fwBody = "";
+    if (fw.model === "zones") {
+      const cell = (src, dst) => {
+        const c = fw.matrix?.[src]?.[dst];
+        if (!c || !c.rules.length) return `<td class="fwcell none">–</td>`;
+        const cls = c.verdict === "ALLOW" ? "allow" : c.return_only ? "ret" : c.verdict === "NONE" ? "none" : "block";
+        const label = c.verdict === "ALLOW" ? "Allow" : c.return_only ? "Return only" : VERB[c.verdict] || c.verdict;
+        const sel = this._fwCell === `${src}|${dst}`;
+        return `<td class="fwcell ${cls}${sel ? " sel" : ""}"><button data-fwcell="${esc(src)}|${esc(dst)}" title="${c.rules.length} rule${c.rules.length === 1 ? "" : "s"}">${label}${c.exceptions ? `<small>${c.exceptions} exception${c.exceptions === 1 ? "" : "s"}</small>` : ""}</button></td>`;
+      };
+      const rowsZ = this._fwZone ? zones.filter((z) => z.id === this._fwZone) : zones;
+      const matrix = `<div class="fwscroll"><table class="fwmatrix"><thead><tr><th class="corner">From ↓ · To →</th>${zones.map((z) => `<th>${esc(z.name)}</th>`).join("")}</tr></thead><tbody>${rowsZ
+        .map((z) => `<tr><th>${esc(z.name)}</th>${zones.map((d) => cell(z.id, d.id)).join("")}</tr>`)
+        .join("")}</tbody></table></div>${this._fwZone ? `<button class="vchip clear" data-fwzone="">Show all zones</button>` : ""}`;
+      const zoneList = `<div class="fwzones">${zones
+        .map((z) => `<div><b>${esc(z.name)}</b> ${z.networks.length ? z.networks.map((n) => `${n.vlan != null ? `<span class="vchip static" style="--c:${vlanColor(n.vlan)}"><i></i>${esc(n.vlan)}</span>` : ""}${esc(n.name)}`).join(", ") : `<span class="muted">${z.key === "external" ? "internet / WAN" : z.key === "gateway" ? "the gateway itself" : "no networks"}</span>`}</div>`)
+        .join("")}</div>`;
+      let detail = "";
+      if (this._fwCell) {
+        const [src, dst] = this._fwCell.split("|");
+        const ids = fw.matrix?.[src]?.[dst]?.rules || [];
+        const all = (fw.policies || []).filter((p) => p.src_zone === src && p.dst_zone === dst).sort((a, b) => a.index - b.index);
+        detail = `<div class="sublabel">${esc(zname[src] || src)} → ${esc(zname[dst] || dst)}: rules in the order the gateway checks them</div>
+          <table class="iptable fwtable"><thead><tr><th>#</th><th>Rule</th><th>Action</th><th>From</th><th>To</th><th>Protocol</th></tr></thead><tbody>${all
+            .map((p, i) => `<tr class="${p.enabled ? "" : "off"}${p.predefined ? " builtin" : ""}"><td class="num">${i + 1}</td>
+              <td>${esc(p.name)}${p.predefined ? ` <span class="pill">built-in</span>` : ""}${p.enabled ? "" : ` <span class="pill">off</span>`}${p.logging ? ` <span class="pill">logged</span>` : ""}${p.schedule !== "ALWAYS" ? ` <span class="pill">scheduled</span>` : ""}${p.description ? `<div class="muted">${esc(p.description)}</div>` : ""}</td>
+              <td><span class="pill fw ${p.action.toLowerCase()}">${esc(VERB[p.action] || p.action)}</span>${p.state ? `<div class="muted">${esc(p.state)}</div>` : ""}</td>
+              <td>${esc(p.src)}</td><td>${esc(p.dst)}</td><td>${esc(p.protocol || "any")}${p.ip_version && p.ip_version !== "BOTH" ? ` <span class="muted">${esc(p.ip_version)}</span>` : ""}</td></tr>`)
+            .join("")}</tbody></table>${ids.length ? "" : `<div class="muted">No rules between these zones.</div>`}`;
+      }
+      fwBody = `<div class="fwnote muted">Each cell is what the gateway does with new traffic from the row's zone to the column's zone. “Return only” means replies to traffic the other side started are let back in. Click a cell for the rules behind it.</div>${matrix}${zoneList}${detail}`;
+    } else if (fw.model === "legacy" || (fw.rules || []).length) {
+      const sets = {};
+      (fw.rules || []).forEach((r) => (sets[r.ruleset] = sets[r.ruleset] || []).push(r));
+      fwBody = Object.keys(sets).length
+        ? Object.entries(sets)
+            .map(([rs, rows]) => `<div class="sublabel">${esc(rs)}</div><table class="iptable fwtable"><thead><tr><th>#</th><th>Rule</th><th>Action</th><th>From</th><th>To</th><th>Protocol</th></tr></thead><tbody>${rows
+              .map((r) => `<tr class="${r.enabled ? "" : "off"}"><td class="num">${r.index}</td><td>${esc(r.name)}${r.state ? `<div class="muted">${esc(r.state)}</div>` : ""}</td><td><span class="pill fw ${r.action === "ACCEPT" ? "allow" : "block"}">${esc(r.action)}</span></td><td>${esc(r.src)}</td><td>${esc(r.dst)}</td><td>${esc(r.protocol || "any")}</td></tr>`)
+              .join("")}</tbody></table>`)
+            .join("")
+        : `<div class="muted fwnote">No custom firewall rules; the gateway's defaults apply.</div>`;
+    } else {
+      fwBody = `<div class="empty">${errs.length ? "The gateway's firewall could not be read with this UniFi account." : "No firewall data yet. Connect the UniFi gateway (integration Configure → UniFi gateway)."}</div>`;
+    }
+    const tr = fw.traffic_rules || [], pf = fw.port_forwards || [];
+    const extra =
+      (tr.length
+        ? `<div class="sublabel">Traffic rules</div><table class="iptable fwtable"><thead><tr><th>Rule</th><th>Action</th><th>Who</th><th>What</th></tr></thead><tbody>${tr
+            .map((r) => `<tr class="${r.enabled ? "" : "off"}"><td>${esc(r.name)}${r.schedule !== "ALWAYS" ? ` <span class="pill">scheduled</span>` : ""}</td><td><span class="pill fw ${r.action === "ALLOW" ? "allow" : "block"}">${esc(VERB[r.action] || r.action)}</span></td><td>${esc(r.who)}</td><td>${esc(r.what)}</td></tr>`)
+            .join("")}</tbody></table>`
+        : "") +
+      (pf.length
+        ? `<div class="sublabel">Port forwards (internet → inside)</div><table class="iptable fwtable"><thead><tr><th>Name</th><th>WAN port</th><th>To</th><th>Protocol</th><th>From</th></tr></thead><tbody>${pf
+            .map((f) => `<tr class="${f.enabled ? "" : "off"}"><td>${esc(f.name)}</td><td class="mono">${esc(f.wan_port)}</td><td class="mono">${esc(f.to)}</td><td>${esc(f.protocol)}</td><td>${esc(f.from)}</td></tr>`)
+            .join("")}</tbody></table>`
+        : "");
+    return `<div class="listbar"><span class="muted">Read-only: nothing here changes Cirrus or the gateway. UNPs from Cirrus; firewall from the UniFi gateway (refreshed every 5 minutes).</span></div>
+      ${unpSection}${ssidSection}
+      <section class="net"><div class="nethead static"><ha-icon icon="mdi:wall-fire"></ha-icon><b>Gateway firewall</b><span class="muted">${fw.model === "zones" ? `zone-based · ${zones.length} zones · ${(fw.policies || []).filter((p) => !p.predefined).length} custom rules` : fw.model === "legacy" ? "rule sets" : ""}</span></div>
+        ${errLine}<div class="fwbody">${fwBody}${extra}</div></section>`;
   }
 
   _alertsView(site) {
@@ -2865,6 +2977,25 @@ class OvCirrusNetworkMap extends HTMLElement {
       })
     );
     root.querySelector("[data-regsweep]")?.addEventListener("click", () => this._regSweep());
+    root.querySelector("[data-unpbuiltin]")?.addEventListener("change", (ev) => {
+      this._unpBuiltin = ev.target.checked;
+      this._render();
+    });
+    root.querySelectorAll("[data-fwcell]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._fwCell = this._fwCell === b.dataset.fwcell ? null : b.dataset.fwcell;
+        this._render();
+        if (this._fwCell) this.shadowRoot.querySelector(".fwbody .sublabel")?.scrollIntoView({ block: "nearest" });
+      })
+    );
+    root.querySelectorAll("[data-fwzone]").forEach((b) =>
+      b.addEventListener("click", () => {
+        this._fwZone = b.dataset.fwzone || null;
+        this._fwCell = null;
+        this._render();
+        if (this._fwZone) this.shadowRoot.querySelector(".fwmatrix")?.scrollIntoView({ block: "nearest" });
+      })
+    );
     root.querySelector("[data-regform]")?.addEventListener("submit", (ev) => {
       ev.preventDefault();
       this._regPreview();
@@ -3047,6 +3178,29 @@ const STYLE = `
   .regsweep { grid-column:1 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:12px; }
   .regsweep .act { margin:0; }
   .regwarn { color:var(--warning-color,#ffa600); }
+  .fwnote { padding:6px 16px; font-size:12.5px; }
+  .fwbody { padding:0 16px 8px; }
+  .fwtable td, .fwtable th { vertical-align:top; }
+  .fwtable td.num, .fwtable th.num { text-align:right; }
+  .fwtable tr.off td { opacity:.5; text-decoration:line-through; }
+  .fwtable tr.builtin td { color:var(--secondary-text-color); }
+  .fwscroll { overflow-x:auto; margin:4px 0 8px; }
+  .fwmatrix { border-collapse:collapse; font-size:12.5px; }
+  .fwmatrix th, .fwmatrix td { border:1px solid var(--divider-color); padding:0; text-align:center; }
+  .fwmatrix th { padding:6px 8px; font-weight:600; background:var(--secondary-background-color, transparent); white-space:nowrap; }
+  .fwmatrix th.corner { font-weight:400; color:var(--secondary-text-color); }
+  .fwcell button { all:unset; display:block; box-sizing:border-box; width:100%; min-width:84px; padding:6px 8px; cursor:pointer; }
+  .fwcell small { display:block; font-size:11px; opacity:.8; }
+  .fwcell.allow { background:color-mix(in srgb, #30a46c 18%, transparent); }
+  .fwcell.block { background:color-mix(in srgb, var(--error-color,#db4437) 16%, transparent); }
+  .fwcell.ret { background:color-mix(in srgb, var(--warning-color,#ffa600) 18%, transparent); }
+  .fwcell.none { color:var(--secondary-text-color); }
+  .fwcell.sel { outline:2px solid var(--primary-color); outline-offset:-2px; }
+  .fwzones { display:grid; gap:3px; font-size:12.5px; margin:4px 0 6px; }
+  .pill.fw.allow { border-color:#30a46c; color:#30a46c; }
+  .pill.fw.block, .pill.fw.reject, .pill.fw.drop { border-color:var(--error-color,#db4437); color:var(--error-color,#db4437); }
+  .zchip { font:inherit; font-size:11px; padding:0 7px; line-height:17px; border-radius:9px; border:1px solid var(--primary-color); color:var(--primary-color); background:none; cursor:pointer; }
+  .zchip.on { background:var(--primary-color); color:var(--text-primary-color,#fff); }
   .regresult { margin-top:12px; display:grid; gap:8px; }
   .regmsgs { padding:8px 10px; border-radius:8px; font-size:12.5px; }
   .regmsgs ul, .regnotes { margin:4px 0 0; padding-left:18px; }

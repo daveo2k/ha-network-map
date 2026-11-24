@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import time
 from dataclasses import dataclass, field
@@ -68,7 +69,7 @@ from .discovery import discover, full_scan
 from .dns import ReverseResolver, parse_servers
 from .identify import HaDevice, identify, is_private_mac
 from .ipam import Reservation, Sighting, build_ipam, merge_networks, parse_cirrus_interfaces, parse_unifi_networks
-from . import probe, registration
+from . import firewall, probe, registration
 from .mac_table import SshError, SwitchTables, fetch_switch_tables, norm_mac
 from .store import EntryStore
 from .topology import MapExtras, build_site_map, model_slug, walk_nodes
@@ -106,7 +107,16 @@ class CirrusData:
     alerts: list = field(default_factory=list)  # Cirrus alerts, newest first
     alerts_error: str | None = None
     ipam: dict = field(default_factory=dict)  # see ipam.build_ipam
+    unifi_firewall: dict = field(default_factory=dict)  # raw UniFi firewall parts (see UnifiClient.firewall)
+    firewall: dict = field(default_factory=dict)  # see firewall.build
     maps: dict[str, dict] = field(default_factory=dict)  # site_id -> card tree
+
+
+def _int(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_port_vlans(rows: list[dict]) -> dict[str, dict]:
@@ -340,6 +350,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         self.assets.ensure_oui()
         data.maps = self._build_maps(data)
         data.ipam = self._build_ipam(data)
+        data.firewall = self._build_firewall(data)
         self._observe(data)
         self._alert_events(data)
         self._schedule_discovery(data)
@@ -488,6 +499,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         if not self.unifi:
             return
         data.unifi_networks, data.unifi_known = prev.unifi_networks, prev.unifi_known
+        data.unifi_firewall = prev.unifi_firewall
         try:
             snap = await self.unifi.snapshot()
         except UnifiError as err:
@@ -502,6 +514,10 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 self._unifi_cfg_at = now
             except UnifiError as err:
                 _LOGGER.debug("UniFi networks / known clients failed: %s", err)
+            try:
+                data.unifi_firewall = await self.unifi.firewall()
+            except UnifiError as err:
+                data.unifi_firewall = {"errors": {"all": str(err)}}
         data.unifi = {
             "wan": snap["wan"],
             "gateway": snap.get("gateway"),
@@ -707,6 +723,116 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         if data.access_error:
             site_map["access_error"] = data.access_error
 
+    def _build_firewall(self, data: CirrusData) -> dict:
+        try:
+            return firewall.build(
+                data.unifi_firewall, data.unifi_networks, data.unifi_known, (data.unifi or {}).get("clients") or {}
+            )
+        except Exception:  # noqa: BLE001 - a firewall format we do not understand must not break the map
+            _LOGGER.exception("Could not decode the UniFi firewall")
+            return {"errors": {"decode": "Could not decode the gateway's firewall (see the log)."}}
+
+    def unp_details(self) -> list[dict]:
+        """Each UNP with where it is assigned, its VLANs, the gateway network on each and that network's
+        firewall zone (for the UNPs view). Read-only."""
+        if not self.data:
+            return []
+        nets = (self.data.ipam or {}).get("networks") or []
+        zone_of = (self.data.firewall or {}).get("zone_of_network") or {}
+        zname = {z["id"]: z["name"] for z in (self.data.firewall or {}).get("zones") or []}
+        counts: dict[str, int] = {}
+        seen_nets: dict[str, set[str]] = {}  # UNP -> network ids its online devices have addresses in
+        wifi_vlans: dict[str, set[int]] = {}  # UNP -> VLANs its wireless clients are on
+        uclients = (self.data.unifi or {}).get("clients") or {}
+        parsed = []
+        for n in nets:
+            try:
+                parsed.append((ipaddress.IPv4Network(n["cidr"]), n))
+            except (KeyError, ValueError):
+                continue
+        for mac, s in (self.data.sessions or {}).items():
+            if not s.get("unp"):
+                continue
+            counts[s["unp"]] = counts.get(s["unp"], 0) + 1
+            ip = (uclients.get(mac) or {}).get("ip") or s.get("ip")
+            try:
+                addr = ipaddress.IPv4Address(str(ip)) if ip else None
+            except ValueError:
+                addr = None
+            if addr:
+                hit = next((n for net, n in parsed if addr in net), None)
+                if hit:
+                    seen_nets.setdefault(s["unp"], set()).add(hit["id"])
+            wv = _int((self.data.clients.get(mac) or {}).get("vlanId"))
+            if wv and wv > 1:
+                wifi_vlans.setdefault(s["unp"], set()).add(wv)
+        out = []
+        for name, u in sorted(self.data.unps.items(), key=lambda kv: kv[0].lower()):
+            vl = set(u.get("vlans") or []) | set(u.get("seen_vlans") or []) | wifi_vlans.get(name, set())
+            on, ids = [], set()
+            for n in nets:
+                by_vlan = n.get("vlan") in vl
+                by_ip = n["id"] in seen_nets.get(name, set())
+                if not (by_vlan or by_ip) or n["id"] in ids:
+                    continue
+                ids.add(n["id"])
+                if n.get("vlan") is not None:
+                    vl.add(n["vlan"])
+                zid = zone_of.get(n["id"]) if n.get("source") == "UniFi" else None
+                on.append({"vlan": n.get("vlan"), "network": n["name"], "network_id": n["id"], "cidr": n["cidr"],
+                           "source": n.get("source"), "zone_id": zid, "zone": zname.get(zid),
+                           "how": "Cirrus VLAN" if by_vlan else "addresses of its online devices"})
+            vl = sorted(vl)
+            out.append({**{k: u.get(k) for k in ("name", "policy_list", "status", "assigned", "captive_portal", "bandwidth")},
+                        "vlans": vl, "networks": on, "clients": counts.get(name, 0)})
+        return out
+
+    def ssid_details(self) -> list[dict]:
+        """Each SSID as its connected clients show it: the VLAN(s) they are on (tagged, or untagged on the AP
+        port's native VLAN), the network that is, and which UNPs they are in. A wireless device whose UNP sets
+        no VLAN (or with no UNP) gets the SSID's own VLAN. Read-only."""
+        if not self.data:
+            return []
+        nets = (self.data.ipam or {}).get("networks") or []
+        parsed = []
+        for n in nets:
+            try:
+                parsed.append((ipaddress.IPv4Network(n["cidr"]), n))
+            except (KeyError, ValueError):
+                continue
+        zone_of = (self.data.firewall or {}).get("zone_of_network") or {}
+        zname = {z["id"]: z["name"] for z in (self.data.firewall or {}).get("zones") or []}
+        uclients = (self.data.unifi or {}).get("clients") or {}
+        by: dict[str, dict] = {}
+        for mac, c in (self.data.clients or {}).items():
+            ssid = c.get("ssid")
+            if not ssid:
+                continue
+            row = by.setdefault(ssid, {"ssid": ssid, "clients": 0, "vlans": {}, "unps": {}, "nets": {}})
+            row["clients"] += 1
+            v = _int(c.get("vlanId"))
+            key = str(v) if v and v > 1 else "untagged"
+            row["vlans"][key] = row["vlans"].get(key, 0) + 1
+            unp = ((self.data.sessions or {}).get(mac) or {}).get("unp") or "(none)"
+            row["unps"][unp] = row["unps"].get(unp, 0) + 1
+            ip = c.get("clientIp") or (uclients.get(mac) or {}).get("ip")
+            try:
+                addr = ipaddress.IPv4Address(str(ip)) if ip else None
+            except ValueError:
+                addr = None
+            hit = next((n for net, n in parsed if addr and addr in net), None)
+            if hit:
+                nid = hit["id"]
+                if nid not in row["nets"]:
+                    zid = zone_of.get(nid) if hit.get("source") == "UniFi" else None
+                    row["nets"][nid] = {"network": hit["name"], "vlan": hit.get("vlan"), "cidr": hit["cidr"],
+                                        "zone_id": zid, "zone": zname.get(zid), "clients": 0}
+                row["nets"][nid]["clients"] += 1
+        out = []
+        for row in sorted(by.values(), key=lambda r: r["ssid"].lower()):
+            out.append({**row, "nets": sorted(row["nets"].values(), key=lambda n: -n["clients"])})
+        return out
+
     def _build_ipam(self, data: CirrusData) -> dict:
         """Subnets, DHCP pools, reservations and every address in use (see ipam.py)."""
         try:
@@ -879,6 +1005,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             return
         self.data.maps = self._build_maps(self.data)
         self.data.ipam = self._build_ipam(self.data)
+        self.data.firewall = self._build_firewall(self.data)
         self._observe(self.data)
         self.async_set_updated_data(self.data)
 

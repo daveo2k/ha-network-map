@@ -296,6 +296,9 @@ def ws_topology(hass: HomeAssistant, connection: websocket_api.ActiveConnection,
                 "alerts": [a for a in coordinator.data.alerts if not a["acknowledged"]]
                 + [a for a in coordinator.data.alerts if a["acknowledged"]][:200],
                 "alerts_error": coordinator.data.alerts_error,
+                "firewall": coordinator.data.firewall,
+                "unp_details": coordinator.unp_details(),
+                "ssids": coordinator.ssid_details(),
             }
         )
     connection.send_result(

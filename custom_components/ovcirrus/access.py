@@ -33,8 +33,22 @@ def parse_unps(rows: list[dict]) -> dict[str, dict]:
                 vid = _vlan_id(v)
                 if vid:
                     vlans.add(vid)
+        assigned = []
+        for a in row.get("assignments") or []:
+            a = a or {}
+            if a.get("device"):
+                assigned.append("Switch " + str(a["device"].get("friendlyName") or a["device"].get("serialNumber") or "?"))
+            elif a.get("group"):
+                assigned.append("AP group " + str(a["group"].get("name") or "?"))
+            elif a.get("site"):
+                assigned.append("Site " + str(a["site"].get("name") or "?"))
+        bw = row.get("bandwidthControl") or {}
+        cp = (row.get("captivePortal") or {}).get("captivePortalType")
         out[name] = {
             "name": name,
+            "assigned": assigned,
+            "captive_portal": cp if cp and cp != "NONE" else None,
+            "bandwidth": {k: bw[k] for k in ("upstreamBandwidth", "downstreamBandwidth") if bw.get(k)} or None,
             "policy_list": (row.get("policyList") or {}).get("name"),
             "vlans": sorted(vlans),
             "seen_vlans": [],

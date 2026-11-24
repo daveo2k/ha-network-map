@@ -127,6 +127,14 @@ The free addresses offered are ones UniFi and Cirrus know nothing about. **Check
 
 > **Firewall:** the ping check only works if the Home Assistant host may send ICMP (ping) to the network being checked. On a UniFi gateway, add a firewall rule allowing ICMP from HA's IP address to each network you register devices on (and the replies back), or the check reports that it proves nothing.
 
+### Access: UNPs, SSIDs and the gateway firewall
+
+The **Access** tab is read-only and shows what decides where a device lands and what it can reach:
+
+- **UNPs (Cirrus access roles):** where each one is assigned (switches, AP groups), the VLAN and network it puts devices on, how many are online in it, and any captive portal or bandwidth limit. Cirrus doesn't always report a UNP's VLAN, so it is also worked out from its online devices (their wireless VLAN and their addresses). If none of your UNPs has Cirrus access rules (a policy list), the tab says so: access is then down to the VLAN and the gateway's firewall.
+- **Wireless networks (SSIDs):** the VLANs each SSID's devices are on (tagged, or untagged on the AP port's native VLAN), the network that is, and which UNPs they're in. A wireless device whose UNP sets no VLAN, or that has no UNP, lands on its SSID's VLAN.
+- **Gateway firewall:** read from the UniFi gateway with the same read-only account. Zone-based firewalls (UniFi Network 9+) show as a zone × zone grid: click a cell for the rules behind it, in the order the gateway checks them. Click a UNP's or SSID's zone to see only that row. Older rule-set firewalls are listed per rule set. Traffic rules and port forwards are listed too.
+
 ## Device identification
 
 Every client, including ones the integration has never seen before, is identified live from:
