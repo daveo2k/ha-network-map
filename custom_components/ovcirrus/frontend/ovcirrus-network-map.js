@@ -1568,7 +1568,10 @@ class OvCirrusNetworkMap extends HTMLElement {
         : "";
     }
     if (this._unp != null && !unps.some((u) => u.name === this._unp)) this._unp = null;
-    return `<div class="vlans unps"><span class="vlabel">UNPs</span>${unps
+    // UNPs with clients (and the highlighted one) are shown; the rest sit behind "+N more".
+    const shown = this._unpAll ? unps : unps.filter((u) => u.clients || u.name === this._unp);
+    const hidden = unps.length - shown.length;
+    return `<div class="vlans unps"><span class="vlabel">UNPs</span>${shown
       .map((u) => {
         const vl = [...new Set([...(u.vlans || []), ...(u.seen_vlans || [])])];
         const tip = [u.name, u.policy_list ? `Policy list: ${u.policy_list}` : "", vl.length ? `VLAN ${vl.join(", ")}` : "",
@@ -1576,7 +1579,10 @@ class OvCirrusNetworkMap extends HTMLElement {
         const c = vl.length ? vlanColor(vl[0]) : "var(--secondary-text-color)";
         return `<button class="vchip${this._unp === u.name ? " on" : ""}${u.clients ? "" : " down"}" data-unp="${esc(u.name)}" style="--c:${c}" title="${esc(tip)}"><i></i>${esc(u.name)}<span>${u.clients}</span></button>`;
       })
-      .join("")}${this._unp != null ? `<button class="vchip clear" data-unp="">Clear</button>` : ""}</div>`;
+      .join("")}${
+        hidden ? `<button class="vchip clear" data-unpall title="UNPs with no clients right now">+${hidden} more</button>`
+        : this._unpAll && unps.some((u) => !u.clients) ? `<button class="vchip clear" data-unpall>Show fewer</button>` : ""
+      }${!shown.length ? `<span class="muted">No clients are in a UNP right now</span>` : ""}${this._unp != null ? `<button class="vchip clear" data-unp="">Clear</button>` : ""}</div>`;
   }
 
   _macOnMap(mac) {
@@ -1650,7 +1656,9 @@ class OvCirrusNetworkMap extends HTMLElement {
           rows.push(used.get(ip) || { ip, state: "free", in_pool: p0 !== null && i >= p0 && i <= p1, sources: [] });
         }
       }
-      const closed = this._netClosed.has(n.id);
+      // Networks with nothing in use start collapsed; a click flips whichever way it started.
+      const startClosed = !n.in_use && !n.reserved;
+      const closed = this._netClosed.has(n.id) ? !startClosed : startClosed;
       const pct = n.pool_pct ?? null;
       const bar = n.pool_size
         ? `<span class="usage" title="${n.pool_used} of ${n.pool_size} pool addresses in use or reserved"><span style="width:${Math.min(100, pct || 0)}%" class="${pct >= 90 ? "bad" : pct >= 75 ? "warnc" : ""}"></span></span><b>${pct}%</b> of pool (${n.pool_free} free)`
@@ -2436,6 +2444,10 @@ class OvCirrusNetworkMap extends HTMLElement {
         this._render();
       })
     );
+    root.querySelector("[data-unpall]")?.addEventListener("click", () => {
+      this._unpAll = !this._unpAll;
+      this._render();
+    });
     root.querySelectorAll("[data-net]").forEach((b) =>
       b.addEventListener("click", () => {
         const id = b.dataset.net;

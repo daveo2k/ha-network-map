@@ -174,6 +174,9 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         self._topology_at = 0.0
         self._ssh_at = 0.0
         self._unifi_cfg_at = 0.0
+        self._sessions_ok = False  # at least one successful read, so a failure can fall back to it
+        self._alerts_ok = False
+        self._alerts_warned = False  # warn once, then keep failures at debug level
         self._cache = CirrusData()
         self._scanning: set[str] = set()
         opts = entry.options
@@ -402,16 +405,23 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         elif isinstance(sessions, Exception):
             _LOGGER.debug("UPAM sessions failed: %s", sessions)
             data.sessions, data.access_error = prev.sessions, prev.access_error
+            if not self._sessions_ok:
+                data.access_error = f"Could not read UPAM sessions from Cirrus: {sessions}"
         else:
             data.sessions = parse_sessions(sessions)
+            self._sessions_ok = True
         add_seen_vlans(data.unps, data.sessions)
         if isinstance(alerts, CirrusForbiddenError):
             data.alerts_error = "The Cirrus application's user may not read alerts"
         elif isinstance(alerts, Exception):
-            _LOGGER.debug("Alerts failed: %s", alerts)
+            (_LOGGER.debug if self._alerts_warned else _LOGGER.warning)("Cirrus alerts read failed: %s", alerts)
+            self._alerts_warned = True
             data.alerts, data.alerts_error = prev.alerts, prev.alerts_error
+            if not self._alerts_ok:  # nothing good to show: say so rather than "no alerts"
+                data.alerts_error = f"Could not read alerts from Cirrus: {alerts}"
         else:
             data.alerts = parse_alerts(alerts)
+            self._alerts_ok = True
 
     async def _update_radios(self, data: CirrusData, prev: CirrusData) -> None:
         aps = {s: d for s, d in data.devices.items() if d.get("deviceFamily") == "AP" and d.get("macAddress")}

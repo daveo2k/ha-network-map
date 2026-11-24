@@ -101,7 +101,7 @@ def parse_cirrus_interfaces(rows: list[dict], vlans: dict[str, dict]) -> list[Ne
             iface = ipaddress.IPv4Interface(f"{addr}/{mask}")
         except ValueError:
             continue
-        if iface.network.prefixlen >= 31 or iface.ip.is_loopback:
+        if iface.network.prefixlen >= 31 or iface.network.prefixlen == 0 or iface.ip.is_loopback or iface.ip.is_unspecified:
             continue
         vlan = row.get("ipInterfaceVlanID")
         try:
@@ -226,8 +226,6 @@ def build_ipam(
         note = None
         if reserved and r["in_pool"]:
             note = "reservation inside the DHCP pool"
-        elif state == "static" and n and n.pool and info.get("online") and "UniFi" in sources:
-            note = "outside the DHCP pool"
         return {
             "ip": r["ip"],
             "mac": mac,
