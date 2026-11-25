@@ -23,7 +23,7 @@ SERVICES: list[dict] = [
     for s in [
         # Essentials
         ("dns", "DNS", "TCP/UDP", "53", "Essentials"),
-        ("dhcp", "DHCP", "UDP", "67-68", "Essentials"),
+        ("dhcp", "DHCP (to the server)", "UDP", "67", "Essentials"),
         ("ntp", "NTP (time)", "UDP", "123", "Essentials"),
         ("icmp", "Ping (ICMP)", "ICMP", "", "Essentials"),
         ("mdns", "mDNS / Bonjour", "UDP", "5353", "Essentials"),
@@ -38,7 +38,7 @@ SERVICES: list[dict] = [
         # Remote access & files
         ("ssh", "SSH / SFTP", "TCP", "22", "Remote access & files"),
         ("telnet", "Telnet", "TCP", "23", "Remote access & files"),
-        ("ftp", "FTP", "TCP", "20-21", "Remote access & files"),
+        ("ftp", "FTP", "TCP", "21", "Remote access & files"),
         ("tftp", "TFTP", "UDP", "69", "Remote access & files"),
         ("rdp", "Remote Desktop (RDP)", "TCP/UDP", "3389", "Remote access & files"),
         ("vnc", "VNC", "TCP", "5900", "Remote access & files"),
@@ -161,12 +161,86 @@ DEST_KINDS = {
     "cidr": "an address or range",
 }
 
+# Cirrus's built-in service ports (Unified Access > Policy groups > Service ports), as read from Cirrus on
+# 2026-11-25. Used when the live list can't be read; the live list also includes ports the user added.
+CIRRUS_DEFAULT_PORTS: list[dict] = [
+    {"protocol": p, "name": n, "startPort": a, "endPort": None}
+    for p, n, a in [
+        ("TCP", "IRC (6666)", 6666), ("TCP", "NNTP (119)", 119), ("TCP", "IPX (213)", 213), ("TCP", "IRC (6668)", 6668),
+        ("TCP", "NNTP-SSL (563)", 563), ("TCP", "Lotus ccmail (3264)", 3264), ("TCP", "Finger (79)", 79),
+        ("TCP", "WinFrame-ICA (1494)", 1494), ("TCP", "America On-Line (5190)", 5190), ("TCP", "POP2 (109)", 109),
+        ("TCP", "Lotus Notes (1352)", 1352), ("TCP", "Gnutella Service (6346)", 6346), ("TCP", "News (2009)", 2009),
+        ("TCP", "BGP (179)", 179), ("TCP", "NetBIOS Session Service (139)", 139), ("TCP", "IMAP (143)", 143),
+        ("TCP", "Microsoft SQL Server 6.0 (1433)", 1433), ("TCP", "Oracle SQL Net (1525)", 1525), ("TCP", "IRC (6667)", 6667),
+        ("TCP", "TELNET (23)", 23), ("TCP", "IRC (6669)", 6669), ("TCP", "LDAP (389)", 389), ("TCP", "Kerberos (750)", 750),
+        ("TCP", "Oracle SQL Net (1521)", 1521), ("TCP", "HTTP (80)", 80), ("TCP", "HylaFAX (4559)", 4559), ("TCP", "SMTP (25)", 25),
+        ("TCP", "LDAP-SSL (636)", 636), ("TCP", "Napster (8875)", 8875), ("TCP", "NetBIOS Name Service (137)", 137),
+        ("TCP", "HTTP-alt (8080)", 8080), ("TCP", "Ident (113)", 113), ("TCP", "POP3 over SSL (995)", 995), ("TCP", "IRC (6665)", 6665),
+        ("TCP", "POP3 (110)", 110), ("TCP", "NetBIOS Datagram Service (138)", 138), ("TCP", "SMTP over SSL (465)", 465),
+        ("TCP", "DNS (53)", 53), ("TCP", "VDOLive (7000)", 7000), ("TCP", "Novell Netware (396)", 396), ("TCP", "FTP (21)", 21),
+        ("TCP", "Real Time Streaming Protocol (554)", 554), ("TCP", "HTTP-SSL (443)", 443), ("TCP", "Gnutella Router (6347)", 6347),
+        ("UDP", "NetBIOS Datagram (138)", 138), ("UDP", "StreamWorks (1558)", 1558), ("UDP", "NetBIOS Name Service (137)", 137),
+        ("UDP", "Bootp client (68)", 68), ("UDP", "SNMP Trap (162)", 162), ("UDP", "NetBIOS Session (139)", 139),
+        ("UDP", "RADIUS (1812)", 1812), ("UDP", "DNS (53)", 53), ("UDP", "RIP Routing Information Protocol (520)", 520),
+        ("UDP", "InterNet Phone (22555)", 22555), ("UDP", "Bootp server (67)", 67), ("UDP", "TFTP (69)", 69),
+        ("UDP", "RADIUS Accounting (1813)", 1813), ("UDP", "NTP Network Time protocol (123)", 123), ("UDP", "TACACS (49)", 49),
+        ("UDP", "SNMP (161)", 161),
+    ]
+]
+IN_CIRRUS = "In Cirrus"
+MORE_CIRRUS = "More Cirrus services"
+NEW_SUFFIX = " (added to Cirrus when used)"
+
+
+def _port_index(ports: list[dict]) -> dict[tuple[str, int, int], str]:
+    """(protocol, start, end) -> Cirrus service port name."""
+    out: dict[tuple[str, int, int], str] = {}
+    for p in ports or []:
+        try:
+            a = int(p["startPort"])
+            b = int(p.get("endPort") or a)
+        except (KeyError, TypeError, ValueError):
+            continue
+        out.setdefault((str(p.get("protocol") or "").upper(), a, b), p.get("name") or f"{a}")
+    return out
+
+
+def _parts(svc: dict) -> list[tuple[str, int, int]]:
+    protos = ["TCP", "UDP"] if svc["proto"] == "TCP/UDP" else [svc["proto"]] if svc["proto"] in ("TCP", "UDP") else []
+    return [(p, a, b) for p in protos for a, b in (_ports(svc["ports"]) or [])]
+
+
+def catalogue(ports: list[dict]) -> list[dict]:
+    """The designer's service list: Cirrus's own service ports first (our friendly entries when every port they
+    need already exists in Cirrus, then the rest of Cirrus's list), then our entries that would add new ports."""
+    idx = _port_index(ports)
+    used: set[tuple[str, int, int]] = set()
+    have, new = [], []
+    for s in SERVICES:
+        parts = _parts(s)
+        missing = [p for p in parts if p not in idx]
+        if s["proto"] == "ICMP" or not missing:
+            used.update(parts)
+            have.append({**s, "group": IN_CIRRUS, "in_cirrus": True, "cirrus_names": [idx[p] for p in parts]})
+        else:
+            new.append({**s, "group": s["group"] + NEW_SUFFIX, "in_cirrus": False,
+                        "adds": [f"{p} {a}" if a == b else f"{p} {a}-{b}" for p, a, b in missing]})
+    more = []
+    for (proto, a, b), pname in idx.items():
+        if (proto, a, b) in used:
+            continue
+        more.append({"id": f"cp:{proto}:{a}-{b}", "name": re.sub(r"\s*\([\d\-]+\)$", "", pname) or pname, "proto": proto,
+                     "ports": str(a) if a == b else f"{a}-{b}", "group": MORE_CIRRUS, "in_cirrus": True, "cirrus_names": [pname]})
+    more.sort(key=lambda x: x["name"].lower())
+    return have + more + new
+
+
 NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 NAME_MAX = 32  # Cirrus doesn't publish a limit; AOS policy names are kept short to be safe
 
 
-def service_search(iana: dict[str, str], query: str, limit: int = 25) -> list[dict]:
-    """Catalogue entries plus IANA registry ports matching a name or port number."""
+def service_search(iana: dict[str, str], query: str, limit: int = 25, services: list[dict] | None = None) -> list[dict]:
+    """Catalogue entries (Cirrus's and ours) plus IANA registry ports matching a name or port number."""
     q = (query or "").strip().lower()
     if not q:
         return []
@@ -174,12 +248,12 @@ def service_search(iana: dict[str, str], query: str, limit: int = 25) -> list[di
         n = name.lower()
         return 0 if q == ports or n == q else 1 if n.startswith(q) else 2 if re.search(rf"\b{re.escape(q)}", n) else 3
 
-    out = sorted((s for s in SERVICES if q in s["name"].lower() or q == s["ports"] or q in s["id"]),
+    out = sorted((s for s in (services or SERVICES) if q in s["name"].lower() or q == s["ports"] or q in s["id"]),
                  key=lambda s: rank(s["name"], s["ports"]))
     hits = []
     for port, name in iana.items():
         if (q == port or q in (name or "").lower()) and not any(s["ports"] == port for s in out):
-            hits.append({"id": f"iana:{port}", "name": f"{name} (IANA)", "proto": "TCP", "ports": port, "group": "IANA registry"})
+            hits.append({"id": f"iana:{port}", "name": f"{name} (IANA)", "proto": "TCP", "ports": port, "group": "IANA registry", "in_cirrus": False})
     hits.sort(key=lambda h: (rank(h["name"][:-7], h["ports"]), int(h["ports"])))
     return (out + hits)[:limit]
 
@@ -200,7 +274,7 @@ def _ports(text: str) -> list[tuple[int, int]] | None:
     return out
 
 
-def _service(rule: dict, iana: dict[str, str]) -> dict | None:
+def _service(rule: dict, iana: dict[str, str], extra: dict[str, dict] | None = None) -> dict | None:
     sid = rule.get("service") or "any"
     if sid == "any":
         return {"id": "any", "name": "anything", "proto": "", "ports": ""}
@@ -212,7 +286,7 @@ def _service(rule: dict, iana: dict[str, str]) -> dict | None:
         port = sid[5:]
         proto = str((rule.get("custom") or {}).get("proto") or "TCP/UDP").upper()
         return {"id": sid, "name": iana.get(port, f"port {port}"), "proto": proto, "ports": port}
-    return SERVICE_BY_ID.get(sid)
+    return SERVICE_BY_ID.get(sid) or (extra or {}).get(sid)
 
 
 def _svc_label(s: dict) -> str:
@@ -235,7 +309,7 @@ def _mask(net: ipaddress.IPv4Network) -> tuple[str, str]:
 
 def build_preview(design: dict, ctx: dict) -> dict:
     """design: {name, vlan, targets:[target ids], rules:[{action, service, custom, dest:{kind, network_id, cidr}}]}
-    ctx: {org_id, networks, targets:[{id, kind, name, group_id|device_mac, device_sn, site_id}], unps:[names],
+    ctx: {org_id, networks, targets:[{id, kind, name, group_id|device_mac, device_sn, site_id, devices?}], unps:[names],
           vlans:[ints], ha_ip, iana}
     Returns {ok, errors, warnings, notes, summary, requests}. Sends nothing."""
     errors: list[str] = []
@@ -244,6 +318,9 @@ def build_preview(design: dict, ctx: dict) -> dict:
     iana = ctx.get("iana") or {}
     org = ctx.get("org_id") or "{orgId}"
     base = f"/ov/v1/organizations/{org}/network-configuration"
+    cirrus_ports = ctx.get("service_ports") or CIRRUS_DEFAULT_PORTS
+    port_idx = _port_index(cirrus_ports)
+    extra = {s["id"]: s for s in catalogue(cirrus_ports) if s["id"].startswith("cp:")}
     nets = {n["id"]: n for n in ctx.get("networks") or []}
 
     name = str(design.get("name") or "").strip()
@@ -280,8 +357,11 @@ def build_preview(design: dict, ctx: dict) -> dict:
     targets = [by_id[t] for t in design.get("targets") or [] if t in by_id]
     if not targets:
         errors.append("Pick at least one switch or AP group to apply it to.")
-    if vlan is None and any(t["kind"] == "Switch" for t in targets):
-        errors.append("A switch assignment needs a VLAN (only AP groups can leave it to the SSID).")
+    if vlan is None and any(t["kind"] != "AP group" for t in targets):
+        errors.append("A switch or device group assignment needs a VLAN (only AP groups can leave it to the SSID).")
+    for t in targets:
+        if t.get("devices") == 0:
+            warnings.append(f"{t['kind']} '{t['name']}' has no devices in it, so this assignment would not reach any switch or AP.")
     if vlan is None and targets:
         notes.append("No VLAN: on AP groups devices stay on their SSID's VLAN (Cirrus stores this as VLAN 0).")
 
@@ -293,7 +373,7 @@ def build_preview(design: dict, ctx: dict) -> dict:
     rules = design.get("rules") or []
     local_blocked = False
     for i, rule in enumerate(rules, 1):
-        svc = _service(rule, iana)
+        svc = _service(rule, iana, extra)
         if not svc:
             errors.append(f"Rule {i}: unknown service.")
             continue
@@ -356,7 +436,7 @@ def build_preview(design: dict, ctx: dict) -> dict:
             for proto, rng in combos:
                 policies.append(_policy(name, len(policies) + 1, svc, proto, rng, action, net, f"rule {i}"))
 
-    warnings.extend(_shadowed(rules, gw_ip, ha_ip, nets, iana))
+    warnings.extend(_shadowed(rules, gw_ip, ha_ip, nets, iana, extra))
     if not rules:
         notes.append("No access rules: the UNP only picks the VLAN, as your UNPs do today. The gateway firewall decides the rest.")
     elif rules[-1].get("dest", {}).get("kind") != "any" or rules[-1].get("service") != "any":
@@ -369,9 +449,33 @@ def build_preview(design: dict, ctx: dict) -> dict:
     for idx, p in enumerate(policies):
         p["policy"]["precedence"] = (total - idx) * 10
 
+    # Every port range uses Cirrus's own service port when one matches; otherwise a new one is created first,
+    # named the way Cirrus's own form names them ("MQTT (1883)", "Plex (32400)", "DHCP (67-68)").
+    new_ports: dict[tuple[str, int, int], dict] = {}
+    for p in policies:
+        svc_name = p.pop("svc_name")
+        l4 = p["policy"]["condition"].get("l4Services") or {}
+        rng = l4.get("dstPortRange")
+        if not rng:
+            continue
+        a, b = (int(x) for x in rng.split(":"))
+        key = (l4["protocol"], a, b)
+        if key not in port_idx and key not in new_ports:
+            label = re.sub(r"\s*\(.*\)$", "", svc_name).strip() or "Custom"
+            new_ports[key] = {"name": f"{label} ({a})" if a == b else f"{label} ({a}-{b})", "protocol": key[0],
+                              "startPort": a, "endPort": None if a == b else b}
+        l4["dstPortName"] = port_idx.get(key) or new_ports[key]["name"]
+    if new_ports:
+        notes.append(f"{len(new_ports)} service port(s) aren't in Cirrus yet and would be added: "
+                     + ", ".join(f"{v['name']} {v['protocol']}" for v in new_ports.values()) + ".")
+
     assignment = _assignment(targets, vlan)
     plist = f"{name}-rules" if name else "-rules"
     requests: list[dict] = []
+    for v in new_ports.values():
+        # Cirrus's web app uses /api/organizations/... (not the documented /ov/v1) for service ports.
+        requests.append({"method": "POST", "path": f"/organizations/{org}/network-configuration/service-ports",
+                         "purpose": f"Add the service port {v['name']} to Cirrus", "body": v})
     pa = _policy_assignment(targets)
     for p in policies:
         requests.append({"method": "POST", "path": f"{base}/unified-policies", "purpose": f"Switch rule: {p.pop('why')}",
@@ -422,14 +526,14 @@ def _dest_nets(rule: dict, gw_ip: str | None, ha_ip: str | None, nets: dict) -> 
     return None
 
 
-def _shadowed(rules: list[dict], gw_ip, ha_ip, nets: dict, iana: dict) -> list[str]:
+def _shadowed(rules: list[dict], gw_ip, ha_ip, nets: dict, iana: dict, extra: dict | None = None) -> list[str]:
     """Rules that can never match because an earlier 'anything' rule already catches all their traffic."""
     out = []
     for j, later in enumerate(rules):
         ld = _dest_nets(later, gw_ip, ha_ip, nets)
         if ld is None:
             continue
-        svc = _service(later, iana)
+        svc = _service(later, iana, extra)
         what = _svc_label(svc) if svc else "its service"
         seen_nets: list = []  # destinations already decided for all traffic by earlier rules
         seen_internet = False
@@ -480,7 +584,7 @@ def _policy(unp: str, n: int, svc: dict, proto: str | None, rng: tuple[int, int]
                             "logMatches": "NO", "save": "YES", "sendTrap": "IGNORE", "defaultList": "NO"},
         "validityPeriod": {"type": "ALL_THE_TIME"},
     }
-    return {"policy": pol, "why": why}
+    return {"policy": pol, "why": why, "svc_name": svc["name"] if svc["name"] else f"{proto or ''} port".strip()}
 
 
 def _assignment(targets: list[dict], vlan: int | None) -> dict:

@@ -197,6 +197,18 @@ class CirrusClient:
     async def get_sites(self, org_id: str) -> list[dict]:
         return await self._get(f"/ov/v1/organizations/{org_id}/sites") or []
 
+    async def get_service_ports(self, org_id: str) -> list[dict]:
+        """Cirrus's service ports (built-in and user-added). Only Cirrus's web app path serves these (no /ov/v1)."""
+        out: list[dict] = []
+        for proto in ("TCP", "UDP"):
+            out.extend(await self._get(f"/organizations/{org_id}/network-configuration/service-ports/type",
+                                       params={"type": proto}) or [])
+        return out
+
+    async def get_groups(self, org_id: str) -> list[dict]:
+        """Device groups of every site (AP groups and the site's 'default device group'), with device counts."""
+        return await self._get(f"/ov/v1/organizations/{org_id}/groups") or []
+
     async def get_devices(self, org_id: str) -> list[dict]:
         return await self._get(f"/ov/v1/organizations/{org_id}/sites/devices") or []
 

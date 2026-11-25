@@ -139,12 +139,12 @@ The **Access** tab is read-only and shows what decides where a device lands and 
 
 Admins can **Design a UNP** from the Access tab: a name, a VLAN (or none, so AP groups keep the SSID's VLAN), the switches and AP groups to apply it to, and access rules checked top to bottom, first match wins. **It creates nothing yet**: Preview shows the rules in plain English and every request Cirrus would receive (switch rules, a policy list, then the UNP itself).
 
-- **Services are built in.** Pick DNS, DHCP, NTP, SSH (TCP 22), FTP (TCP 20-21), HTTPS, MQTT, Home Assistant and about 70 others by name, or search by name or port: the built-in list first, then the IANA service registry. Anything else is a custom protocol and port.
+- **Cirrus's own services first.** The list starts with the services Cirrus already has (read live from Cirrus, or a built-in copy of its defaults), so rules reuse names like "DNS (53)" and "HTTP-SSL (443)". Services Cirrus doesn't have, such as MQTT, Plex or Home Assistant, come from the designer's catalogue of about 70 or a search of the IANA service registry, are marked "new", and would be added to Cirrus's service list when used. Anything else is a custom protocol and port.
 - **Destinations are friendly too:** anywhere, the internet (not local addresses), any local address, the gateway, Home Assistant, one of your networks, or an address or range.
 - **Templates** to start from: guest internet only, IoT (Home Assistant plus internet basics), isolated, or no rules.
 - It warns about rules that can never match because an earlier rule already decides that traffic, a VLAN shared by two gateway networks, a VLAN the switches don't have yet, and names already in use.
 
-"The internet" can't be written as one switch rule, so it becomes "block this service to local ranges, then allow it anywhere". The request formats come from Cirrus's API documentation and will be checked against a UNP built by hand in Cirrus before any write step is added.
+"The internet" can't be written as one switch rule, so it becomes "block this service to local ranges, then allow it anywhere". The request formats are matched to a UNP, policy list and policies built by hand in Cirrus; nothing is sent to Cirrus yet.
 
 ## Device identification
 

@@ -2083,7 +2083,8 @@ class OvCirrusNetworkMap extends HTMLElement {
 
   _desSvcLabel(s) {
     if (!s) return "?";
-    return s.proto === "ICMP" || !s.ports ? s.name : `${s.name} · ${s.proto} ${s.ports}`;
+    const base = s.proto === "ICMP" || !s.ports ? s.name : `${s.name} · ${s.proto} ${s.ports}`;
+    return s.in_cirrus === false ? `${base} · new` : base;
   }
 
   _desPanel() {
@@ -2123,9 +2124,9 @@ class OvCirrusNetworkMap extends HTMLElement {
       hits == null ? "" : hits.length
         ? `<div class="deshits">${hits.map((h, j) => `<button type="button" class="zchip" data-deshit="${j}" title="Add an Allow rule for this">${esc(this._desSvcLabel(h))}</button>`).join("")}</div>`
         : `<span class="muted">Nothing found; use “Custom protocol / port…” instead.</span>`
-    }</div>`;
+    }<span class="muted">Services marked “new” aren't in Cirrus yet and would be added to its service list${o.service_ports_live === false ? " (Cirrus's list couldn't be read, so the built-in copy is used)" : ""}.</span></div>`;
     const targets = o.targets
-      .map((t) => `<label class="check"><input type="checkbox" data-destarget="${esc(t.id)}" ${f.targets.includes(t.id) ? "checked" : ""}> ${esc(t.kind)} <b>${esc(t.name)}</b></label>`)
+      .map((t) => `<label class="check"><input type="checkbox" data-destarget="${esc(t.id)}" ${f.targets.includes(t.id) ? "checked" : ""}> ${esc(t.kind)} <b>${esc(t.name)}</b>${t.devices != null ? ` <span class="muted">(${t.devices} device${t.devices === 1 ? "" : "s"})</span>` : ""}</label>`)
       .join("");
     const byVlan = {};
     o.networks.filter((n) => n.vlan).forEach((n) => (byVlan[n.vlan] = byVlan[n.vlan] || []).push(n));
@@ -3631,6 +3632,7 @@ const STYLE = `
   .listview .ackd { color:var(--secondary-text-color); --mdc-icon-size:16px; }
   .listbar .muted, .listview .muted { color:var(--secondary-text-color); font-size:12px; }
   .check { display:inline-flex; align-items:center; gap:5px; font-size:13px; cursor:pointer; }
+  .check .muted { color:var(--secondary-text-color); font-size:12px; }
   .regpanel { margin:10px 16px; padding:12px 14px; border:1px solid var(--primary-color); border-radius:10px; background:var(--card-background-color); font-size:13px; }
   .reghead { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:8px; }
   .reghead .act { margin:0 0 0 auto; }

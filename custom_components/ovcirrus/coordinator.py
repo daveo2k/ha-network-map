@@ -248,6 +248,8 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         self._alerts_ok = False
         self._alerts_warned = False  # warn once, then keep failures at debug level
         self._alert_defs: tuple[float, list] | None = None  # (fetched at, alert definitions)
+        self._groups: tuple[float, list] | None = None  # (fetched at, device groups) for the UNP designer
+        self._svc_ports: tuple[float, list | None] | None = None  # (fetched at, Cirrus service ports or None)
         self._cache = CirrusData()
         self._scanning: set[str] = set()
         opts = entry.options
@@ -1020,6 +1022,20 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 if a.get("group_id"):
                     targets.setdefault("g:" + a["group_id"], {"id": "g:" + a["group_id"], "kind": "AP group", "name": a["target"],
                                                               "group_id": a["group_id"], "site_id": a.get("site_id")})
+        now = time.monotonic()
+        if self._groups is None or now - self._groups[0] > 300:
+            try:
+                self._groups = (now, await self.client.get_groups(self.org_id))
+            except Exception as err:  # noqa: BLE001 - fall back to the groups the UNPs already name
+                _LOGGER.debug("Could not read device groups: %s", err)
+                self._groups = (now, (self._groups or (0, []))[1])
+        for g in self._groups[1]:
+            if not g.get("id"):
+                continue
+            kind = "AP group" if g.get("ssids") else "Device group"
+            targets["g:" + g["id"]] = {"id": "g:" + g["id"], "kind": kind, "name": g.get("name") or g["id"],
+                                       "group_id": g["id"], "site_id": (g.get("site") or {}).get("id"),
+                                       "devices": g.get("numberOfDevices")}
         for serial, d in data.devices.items():
             if d.get("deviceFamily") == "AOS" and d.get("macAddress"):
                 targets.setdefault("d:" + serial, {"id": "d:" + serial, "kind": "Switch", "name": d.get("name") or d.get("friendlyName") or serial,
@@ -1030,6 +1046,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         except Exception:  # noqa: BLE001 - only used to offer "Home Assistant" as a destination
             ha_ip = None
         iana = await self.hass.async_add_executor_job(_iana_ports)
+        ports = await self._service_ports()
         vlans = {int(v) for v in (data.vlans or {}) if str(v).isdigit()}
         return {
             "org_id": self.org_id,
@@ -1039,18 +1056,35 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             "vlans": sorted(vlans | {n.get("vlan") for n in (data.ipam or {}).get("networks") or [] if n.get("source") == "Cirrus" and n.get("vlan")}),
             "ha_ip": ha_ip,
             "iana": iana,
+            "service_ports": ports or designer.CIRRUS_DEFAULT_PORTS,
+            "service_ports_live": ports is not None,
         }
+
+    async def _service_ports(self) -> list | None:
+        """Cirrus's service ports, re-read every 10 minutes; None when Cirrus won't serve them to this account."""
+        now = time.monotonic()
+        if self._svc_ports is None or now - self._svc_ports[0] > 600:
+            try:
+                rows = await self.client.get_service_ports(self.org_id)
+                self._svc_ports = (now, rows if rows else None)
+            except Exception as err:  # noqa: BLE001 - the designer falls back to Cirrus's built-in list
+                _LOGGER.debug("Could not read Cirrus service ports, using the built-in list: %s", err)
+                self._svc_ports = (now, None)
+        return self._svc_ports[1]
 
     async def async_designer_options(self) -> dict:
         ctx = await self._designer_ctx()
-        return {**{k: v for k, v in ctx.items() if k not in ("iana", "org_id")}, "services": designer.SERVICES,
+        return {**{k: v for k, v in ctx.items() if k not in ("iana", "org_id", "service_ports")},
+                "services": designer.catalogue(ctx["service_ports"]),
                 "templates": designer.TEMPLATES, "dest_kinds": designer.DEST_KINDS}
 
     async def async_designer_preview(self, design: dict) -> dict:
         return designer.build_preview(design, await self._designer_ctx())
 
     async def async_service_search(self, query: str) -> list[dict]:
-        return designer.service_search(await self.hass.async_add_executor_job(_iana_ports), query)
+        ports = await self._service_ports()
+        return designer.service_search(await self.hass.async_add_executor_job(_iana_ports), query,
+                                       services=designer.catalogue(ports or designer.CIRRUS_DEFAULT_PORTS))
 
     def registration_options(self) -> dict:
         """Networks with free addresses and the UNPs, for the registration form."""
