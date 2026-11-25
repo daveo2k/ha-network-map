@@ -267,7 +267,9 @@ PROFILE_RULES: list[tuple[re.Pattern, str]] = [
         (r"espressif|tuya|smart home|home automation|iot modules|texas instruments iot", "iot"),
     ]
 ]
-PROFILE_MIN_SCORE = 50  # Cirrus scores 0-100; below this its guess is not used for the type
+# Cirrus scores 0-100. Below this its guess is not used for the type, only shown in the details: at 57 it calls
+# real TP-Link cameras and TP-Link P110M plugs both "TP-Link IP Camera", so mid scores cannot be trusted.
+PROFILE_MIN_SCORE = 70
 
 
 def profile_type(category: str | None, score: Any) -> str | None:
@@ -321,8 +323,6 @@ def identify(
         ident.sources.append("Cirrus fingerprint")
 
     prof_type = profile_type((profile or {}).get("category"), (profile or {}).get("score"))
-    if prof_type:
-        ident.sources.append("Cirrus profiling")
 
     ha_type = None
     if ha and (ha.domain or ha.model):
@@ -357,6 +357,8 @@ def identify(
         or vendor_type
         or "unknown"
     )
+    if prof_type and ident.type == prof_type and not (override_type or ha_type or host_type):
+        ident.sources.append("Cirrus profiling")  # only credited when its match decided the type
     if override_type:
         ident.sources.insert(0, "your override")
 
