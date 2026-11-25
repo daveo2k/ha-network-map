@@ -126,6 +126,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     websocket_api.async_register_command(hass, ws_register_preview)
     websocket_api.async_register_command(hass, ws_register_ping)
     websocket_api.async_register_command(hass, ws_alert_details)
+    websocket_api.async_register_command(hass, ws_unp_design_options)
+    websocket_api.async_register_command(hass, ws_unp_design_preview)
+    websocket_api.async_register_command(hass, ws_service_search)
     _register_services(hass)
     return True
 
@@ -746,3 +749,43 @@ async def ws_alert_details(hass: HomeAssistant, connection: websocket_api.Active
         connection.send_result(msg["id"], await coordinator.async_alert_details(msg["alert_id"]))
     except ValueError as err:
         connection.send_error(msg["id"], "not_found", str(err))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): "ovcirrus/unp_design_options", vol.Required("entry_id"): str})
+@websocket_api.async_response
+async def ws_unp_design_options(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Services, templates, networks and targets for the UNP designer (preview only)."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    connection.send_result(msg["id"], await coordinator.async_designer_options())
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ovcirrus/unp_design_preview", vol.Required("entry_id"): str, vol.Required("design"): dict}
+)
+@websocket_api.async_response
+async def ws_unp_design_preview(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """What creating this UNP would send to Cirrus. Sends nothing."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    connection.send_result(msg["id"], await coordinator.async_designer_preview(msg["design"]))
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {vol.Required("type"): "ovcirrus/service_search", vol.Required("entry_id"): str, vol.Required("query"): str}
+)
+@websocket_api.async_response
+async def ws_service_search(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict) -> None:
+    """Services by name or port: the built-in list, then the IANA registry."""
+    coordinator = _coordinator(hass, msg["entry_id"])
+    if not coordinator:
+        connection.send_error(msg["id"], "not_found", "Unknown entry")
+        return
+    connection.send_result(msg["id"], await coordinator.async_service_search(msg["query"]))

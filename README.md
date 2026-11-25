@@ -135,6 +135,17 @@ The **Access** tab is read-only and shows what decides where a device lands and 
 - **Wireless networks (SSIDs):** the VLANs each SSID's devices are on (tagged, or untagged on the AP port's native VLAN), the network that is, and which UNPs they're in. A wireless device whose UNP sets no VLAN, or that has no UNP, lands on its SSID's VLAN.
 - **Gateway firewall:** read from the UniFi gateway with the same read-only account. Zone-based firewalls (UniFi Network 9+) show as a zone × zone grid: click a cell for the rules behind it, in the order the gateway checks them. Click a UNP's or SSID's zone to see only that row. Older rule-set firewalls are listed per rule set. Traffic rules and port forwards are listed too.
 
+### Design a UNP (preview)
+
+Admins can **Design a UNP** from the Access tab: a name, a VLAN (or none, so AP groups keep the SSID's VLAN), the switches and AP groups to apply it to, and access rules checked top to bottom, first match wins. **It creates nothing yet**: Preview shows the rules in plain English and every request Cirrus would receive (switch rules, a policy list, then the UNP itself).
+
+- **Services are built in.** Pick DNS, DHCP, NTP, SSH (TCP 22), FTP (TCP 20-21), HTTPS, MQTT, Home Assistant and about 70 others by name, or search by name or port: the built-in list first, then the IANA service registry. Anything else is a custom protocol and port.
+- **Destinations are friendly too:** anywhere, the internet (not local addresses), any local address, the gateway, Home Assistant, one of your networks, or an address or range.
+- **Templates** to start from: guest internet only, IoT (Home Assistant plus internet basics), isolated, or no rules.
+- It warns about rules that can never match because an earlier rule already decides that traffic, a VLAN shared by two gateway networks, a VLAN the switches don't have yet, and names already in use.
+
+"The internet" can't be written as one switch rule, so it becomes "block this service to local ranges, then allow it anywhere". The request formats come from Cirrus's API documentation and will be checked against a UNP built by hand in Cirrus before any write step is added.
+
 ## Device identification
 
 Every client, including ones the integration has never seen before, is identified live from:

@@ -50,7 +50,13 @@ def parse_unps(rows: list[dict]) -> dict[str, dict]:
                 continue
             assigned.append(f"{kind} {target}")
             m = a.get("vlanTunnelMapping")
-            entry = {"kind": kind, "target": target, "status": a.get("configStatus")}
+            entry = {"kind": kind, "target": target, "status": a.get("configStatus"),
+                     "site_id": (a.get("site") or {}).get("id") or (a.get("group") or {}).get("site")}
+            if a.get("group"):
+                entry["group_id"] = a["group"].get("id")
+            if a.get("device"):
+                entry["device_mac"] = a["device"].get("macAddress") or a.get("deviceMac")
+                entry["device_sn"] = a["device"].get("serialNumber")
             if isinstance(m, dict):
                 vids = [v for v in (_vlan_id(x) for x in m.get("vlans") or []) if v]
                 mtype = m.get("mappingType") or ""

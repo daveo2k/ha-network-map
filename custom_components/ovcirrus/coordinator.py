@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
+import pathlib
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -69,13 +71,28 @@ from .discovery import discover, full_scan
 from .dns import ReverseResolver, parse_servers
 from .identify import HaDevice, identify, is_private_mac
 from .ipam import Reservation, Sighting, build_ipam, merge_networks, parse_cirrus_interfaces, parse_unifi_networks
-from . import firewall, probe, registration
+from . import designer, firewall, probe, registration
 from .mac_table import SshError, SwitchTables, fetch_switch_tables, norm_mac
 from .store import EntryStore
 from .topology import MapExtras, build_site_map, model_slug, walk_nodes
 from .unifi import UnifiClient, UnifiError
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_IANA_CACHE: dict[str, str] | None = None
+
+
+def _iana_ports() -> dict[str, str]:
+    """Port -> service name from the bundled IANA registry (blocking read; call in an executor)."""
+    global _IANA_CACHE
+    if _IANA_CACHE is None:
+        try:
+            with open(pathlib.Path(__file__).with_name("iana_ports.json"), encoding="utf-8") as fh:
+                _IANA_CACHE = {str(k): v for k, v in json.load(fh).items()}
+        except (OSError, ValueError):
+            _IANA_CACHE = {}
+    return _IANA_CACHE
 
 
 def _iot_profiles(rows: list[dict]) -> dict[str, dict]:
@@ -991,6 +1008,49 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 if node.get("mac") and self.store.is_new(node["mac"]):
                     node["is_new"] = True
             site_map["summary"]["new_devices"] = len(self.store.recent_new())
+
+    # ---------------------------------------------------------------- UNP designer (preview only)
+    async def _designer_ctx(self) -> dict:
+        from homeassistant.components.network import async_get_source_ip
+
+        data = self.data or CirrusData()
+        targets: dict[str, dict] = {}
+        for u in data.unps.values():
+            for a in u.get("assignments") or []:
+                if a.get("group_id"):
+                    targets.setdefault("g:" + a["group_id"], {"id": "g:" + a["group_id"], "kind": "AP group", "name": a["target"],
+                                                              "group_id": a["group_id"], "site_id": a.get("site_id")})
+        for serial, d in data.devices.items():
+            if d.get("deviceFamily") == "AOS" and d.get("macAddress"):
+                targets.setdefault("d:" + serial, {"id": "d:" + serial, "kind": "Switch", "name": d.get("name") or d.get("friendlyName") or serial,
+                                                   "device_mac": d["macAddress"], "device_sn": serial,
+                                                   "site_id": (d.get("site") or {}).get("id")})
+        try:
+            ha_ip = await async_get_source_ip(self.hass)
+        except Exception:  # noqa: BLE001 - only used to offer "Home Assistant" as a destination
+            ha_ip = None
+        iana = await self.hass.async_add_executor_job(_iana_ports)
+        vlans = {int(v) for v in (data.vlans or {}) if str(v).isdigit()}
+        return {
+            "org_id": self.org_id,
+            "networks": [{k: n.get(k) for k in ("id", "name", "cidr", "vlan", "gateway")} for n in (data.ipam or {}).get("networks") or []],
+            "targets": sorted(targets.values(), key=lambda t: (t["kind"], t["name"].lower())),
+            "unps": sorted(data.unps),
+            "vlans": sorted(vlans | {n.get("vlan") for n in (data.ipam or {}).get("networks") or [] if n.get("source") == "Cirrus" and n.get("vlan")}),
+            "ha_ip": ha_ip,
+            "iana": iana,
+        }
+
+    async def async_designer_options(self) -> dict:
+        ctx = await self._designer_ctx()
+        return {**{k: v for k, v in ctx.items() if k not in ("iana", "org_id")}, "services": designer.SERVICES,
+                "templates": designer.TEMPLATES, "dest_kinds": designer.DEST_KINDS}
+
+    async def async_designer_preview(self, design: dict) -> dict:
+        return designer.build_preview(design, await self._designer_ctx())
+
+    async def async_service_search(self, query: str) -> list[dict]:
+        return designer.service_search(await self.hass.async_add_executor_job(_iana_ports), query)
 
     def registration_options(self) -> dict:
         """Networks with free addresses and the UNPs, for the registration form."""

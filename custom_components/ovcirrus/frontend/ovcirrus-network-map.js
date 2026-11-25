@@ -2067,6 +2067,226 @@ class OvCirrusNetworkMap extends HTMLElement {
       </form>${result}</section>`;
   }
 
+  async _openDesigner() {
+    const site = this._sites?.[this._siteIdx];
+    if (!site) return;
+    this._des = { form: { name: "", vlan: "", targets: [], rules: [], template: "" }, opts: null, preview: null, busy: true, err: null, find: { q: "", hits: null } };
+    this._render();
+    try {
+      this._des.opts = await this._hass.callWS({ type: "ovcirrus/unp_design_options", entry_id: site.entry_id });
+    } catch (err) {
+      this._des.err = `Could not load the designer: ${err?.message || err}`;
+    }
+    this._des.busy = false;
+    this._render();
+  }
+
+  _desSvcLabel(s) {
+    if (!s) return "?";
+    return s.proto === "ICMP" || !s.ports ? s.name : `${s.name} · ${s.proto} ${s.ports}`;
+  }
+
+  _desPanel() {
+    const d = this._des, f = d.form, o = d.opts || { services: [], templates: [], networks: [], targets: [], dest_kinds: {} };
+    const opt = (v, label, sel, extra = "") => `<option value="${esc(v)}"${sel ? " selected" : ""}${extra}>${esc(label)}</option>`;
+    const groups = {};
+    o.services.forEach((s) => (groups[s.group] = groups[s.group] || []).push(s));
+    const svcSelect = (r, i) =>
+      `<select data-desrule="${i}" data-desk="service">${opt("any", "Anything (all traffic)", r.service === "any")}${opt("custom", "Custom protocol / port…", r.service === "custom")}${Object.entries(groups)
+        .map(([g, list]) => `<optgroup label="${esc(g)}">${list.map((s) => opt(s.id, this._desSvcLabel(s), r.service === s.id)).join("")}</optgroup>`)
+        .join("")}</select>`;
+    const nets = o.networks.filter((n) => n.cidr);
+    const destSelect = (r, i) => {
+      const k = r.dest?.kind || "any", cur = k === "network" ? `network:${r.dest.network_id}` : k;
+      const base = ["any", "internet", "local", "gateway", "ha"].map((x) => opt(x, (o.dest_kinds[x] || x)[0].toUpperCase() + (o.dest_kinds[x] || x).slice(1) + (x === "ha" && o.ha_ip ? ` (${o.ha_ip})` : ""), cur === x)).join("");
+      return `<select data-desrule="${i}" data-desk="dest">${base}<optgroup label="Networks">${nets
+        .map((n) => opt(`network:${n.id}`, `${n.name} · ${n.cidr}`, cur === `network:${n.id}`))
+        .join("")}</optgroup>${opt("cidr", "An address or range…", cur === "cidr")}</select>`;
+    };
+    const ruleRows = f.rules
+      .map(
+        (r, i) => `<tr><td class="num">${i + 1}</td>
+          <td><select data-desrule="${i}" data-desk="action">${opt("allow", "Allow", r.action === "allow")}${opt("block", "Block", r.action !== "allow")}</select></td>
+          <td>${svcSelect(r, i)}${
+            r.service === "custom"
+              ? `<div class="desinline"><select data-desrule="${i}" data-desk="proto">${["TCP", "UDP", "TCP/UDP"].map((p) => opt(p, p, (r.custom?.proto || "TCP") === p)).join("")}</select>
+                 <input data-desrule="${i}" data-desk="ports" class="mono" placeholder="e.g. 3306 or 8000-8100" value="${esc(r.custom?.ports || "")}">
+                 <input data-desrule="${i}" data-desk="cname" placeholder="Name (optional)" value="${esc(r.custom?.name || "")}"></div>`
+              : ""
+          }</td>
+          <td>${destSelect(r, i)}${r.dest?.kind === "cidr" ? `<div class="desinline"><input data-desrule="${i}" data-desk="cidr" class="mono" placeholder="192.168.1.10 or 10.0.0.0/8" value="${esc(r.dest.cidr || "")}"></div>` : ""}</td>
+          <td class="desbtns"><button type="button" class="act ghost" data-desmove="${i}:-1" ${i ? "" : "disabled"} title="Move up">↑</button><button type="button" class="act ghost" data-desmove="${i}:1" ${i < f.rules.length - 1 ? "" : "disabled"} title="Move down">↓</button><button type="button" class="act ghost" data-desdel="${i}" title="Remove">✕</button></td></tr>`
+      )
+      .join("");
+    const hits = d.find.hits;
+    const findHtml = `<div class="desfind"><input type="search" data-desfind placeholder="Find a service or port (e.g. mysql, 3306)" value="${esc(d.find.q)}">${
+      hits == null ? "" : hits.length
+        ? `<div class="deshits">${hits.map((h, j) => `<button type="button" class="zchip" data-deshit="${j}" title="Add an Allow rule for this">${esc(this._desSvcLabel(h))}</button>`).join("")}</div>`
+        : `<span class="muted">Nothing found; use “Custom protocol / port…” instead.</span>`
+    }</div>`;
+    const targets = o.targets
+      .map((t) => `<label class="check"><input type="checkbox" data-destarget="${esc(t.id)}" ${f.targets.includes(t.id) ? "checked" : ""}> ${esc(t.kind)} <b>${esc(t.name)}</b></label>`)
+      .join("");
+    const byVlan = {};
+    o.networks.filter((n) => n.vlan).forEach((n) => (byVlan[n.vlan] = byVlan[n.vlan] || []).push(n));
+    const vlanNets = Object.entries(byVlan).map(([v, ns]) => ({ vlan: +v, name: ns.map((n) => n.name).join(" / "), cidr: ns.map((n) => n.cidr).join(", ") }));
+    const pv = d.preview;
+    const result = pv
+      ? `<div class="regresult">
+          ${pv.errors.length ? `<div class="regmsgs bad"><b>Can't create it like this:</b><ul>${pv.errors.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+          ${pv.warnings.length ? `<div class="regmsgs warn"><ul>${pv.warnings.map((e) => `<li>${esc(e)}</li>`).join("")}</ul></div>` : ""}
+          ${pv.summary.length ? `<div class="sublabel">Rules, in order (first match wins)</div><div class="dessum">${pv.summary.map((x) => `<div>${esc(x)}</div>`).join("")}</div>` : ""}
+          ${pv.requests.length ? `<div class="sublabel">What Cirrus would receive: ${pv.requests.length} request${pv.requests.length > 1 ? "s" : ""} (${pv.policy_count} switch rule${pv.policy_count === 1 ? "" : "s"})</div><ol class="regsteps">${pv.requests
+            .map((q) => `<li><div class="rshead"><ha-icon icon="mdi:cloud-outline"></ha-icon><b>Cirrus</b><span class="pill">Create</span>${esc(q.purpose)}</div>
+                <details><summary>Request</summary><pre>${esc(q.method)} ${esc(q.path)}\n${esc(JSON.stringify(q.body, null, 2))}</pre></details></li>`)
+            .join("")}</ol>` : ""}
+          ${pv.notes.length ? `<ul class="regnotes">${pv.notes.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}
+        </div>`
+      : "";
+    return `<section class="regpanel"><div class="reghead"><b>Design a UNP</b><span class="pill">Preview only</span>
+        <span class="muted">Nothing is created in Cirrus: this shows exactly what it would take.</span>
+        <button class="act ghost" data-desclose>Close</button></div>
+      ${d.err ? `<div class="formerr">${esc(d.err)}</div>` : ""}
+      <form class="regform" data-desform>
+        <label>Name<input data-des="name" value="${esc(f.name)}" placeholder="e.g. Guest-Internet" required></label>
+        <label>VLAN<select data-des="vlan">${opt("", "None: AP groups use the SSID's VLAN", f.vlan === "")}${vlanNets
+          .map((n) => opt(String(n.vlan), `${n.vlan} · ${n.name} · ${n.cidr}`, String(f.vlan) === String(n.vlan)))
+          .join("")}${f.vlan && !vlanNets.some((n) => String(n.vlan) === String(f.vlan)) ? opt(f.vlan, `${f.vlan} (not on the gateway)`, true) : ""}${opt("other", "Another VLAN number…", false)}</select></label>
+        <label>Start from<select data-destemplate>${opt("", "Pick a template…", !f.template)}${o.templates.map((t) => opt(t.id, t.name, f.template === t.id, ` title="${esc(t.description)}"`)).join("")}</select></label>
+        <div class="destargets"><div class="sublabel">Apply to</div>${targets || `<span class="muted">${d.busy ? "Loading…" : "No switches or AP groups known."}</span>`}</div>
+        <div class="desrules"><div class="sublabel">Access rules <span class="muted">checked top to bottom; the first that matches decides</span></div>
+          ${f.rules.length ? `<table class="iptable destable"><colgroup><col style="width:28px"><col style="width:92px"><col><col style="width:34%"><col style="width:96px"></colgroup><thead><tr><th class="num">#</th><th>Action</th><th>Service</th><th>To</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : `<div class="muted">No rules: the UNP only sets the VLAN (as your UNPs do today).</div>`}
+          <div class="row"><button type="button" class="act ghost" data-desadd>Add rule</button>${findHtml}</div></div>
+        <div class="row"><button class="act" type="submit" ${d.busy ? "disabled" : ""}>${d.busy ? "Checking…" : "Preview"}</button></div>
+      </form>${result}</section>`;
+  }
+
+  async _desPreview() {
+    const site = this._sites?.[this._siteIdx];
+    if (!site || !this._des) return;
+    this._des.busy = true;
+    this._des.err = null;
+    this._render();
+    try {
+      const f = this._des.form;
+      const design = { name: f.name, vlan: f.vlan === "" ? null : f.vlan, targets: f.targets, rules: f.rules };
+      this._des.preview = await this._hass.callWS({ type: "ovcirrus/unp_design_preview", entry_id: site.entry_id, design });
+    } catch (err) {
+      this._des.err = `Preview failed: ${err?.message || err}`;
+    }
+    this._des.busy = false;
+    this._render();
+  }
+
+  async _desFind(q) {
+    const site = this._sites?.[this._siteIdx];
+    this._des.find = { q, hits: null };
+    if (q.trim().length < 2 || !site) return this._render();
+    try {
+      const hits = await this._hass.callWS({ type: "ovcirrus/service_search", entry_id: site.entry_id, query: q });
+      if (this._des?.find.q === q) this._des.find.hits = hits;
+    } catch (err) {
+      this._des.find.hits = [];
+    }
+    this._render();
+  }
+
+  _wireDesigner(root) {
+    const d = this._des;
+    root.querySelector("[data-desopen]")?.addEventListener("click", () => this._openDesigner());
+    if (!d) return;
+    const dirty = () => {
+      d.preview = null;
+      this._render();
+    };
+    root.querySelector("[data-desclose]")?.addEventListener("click", () => {
+      this._des = null;
+      this._render();
+    });
+    root.querySelector("[data-desform]")?.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      this._desPreview();
+    });
+    root.querySelector("[data-des='name']")?.addEventListener("change", (ev) => {
+      d.form.name = ev.target.value.trim();
+      dirty();
+    });
+    root.querySelector("[data-des='vlan']")?.addEventListener("change", (ev) => {
+      let v = ev.target.value;
+      if (v === "other") v = (prompt("VLAN number (1–4094)") || "").trim();
+      d.form.vlan = v;
+      dirty();
+    });
+    root.querySelector("[data-destemplate]")?.addEventListener("change", (ev) => {
+      const t = (d.opts?.templates || []).find((x) => x.id === ev.target.value);
+      if (!t) return;
+      if (d.form.rules.length && !confirm(`Replace the ${d.form.rules.length} rule(s) with the “${t.name}” template?`)) return this._render();
+      d.form.template = t.id;
+      d.form.rules = JSON.parse(JSON.stringify(t.rules));
+      dirty();
+    });
+    root.querySelectorAll("[data-destarget]").forEach((cb) =>
+      cb.addEventListener("change", () => {
+        const id = cb.dataset.destarget;
+        d.form.targets = cb.checked ? [...new Set([...d.form.targets, id])] : d.form.targets.filter((x) => x !== id);
+        dirty();
+      })
+    );
+    root.querySelectorAll("[data-desrule]").forEach((el) =>
+      el.addEventListener("change", () => {
+        const r = d.form.rules[+el.dataset.desrule], k = el.dataset.desk, v = el.value;
+        if (!r) return;
+        r.custom = r.custom || {};
+        if (k === "action") r.action = v;
+        else if (k === "service") r.service = v;
+        else if (k === "proto") r.custom.proto = v;
+        else if (k === "ports") r.custom.ports = v.trim();
+        else if (k === "cname") r.custom.name = v.trim();
+        else if (k === "dest") r.dest = v.startsWith("network:") ? { kind: "network", network_id: v.slice(8) } : { kind: v, cidr: r.dest?.cidr };
+        else if (k === "cidr") r.dest = { kind: "cidr", cidr: v.trim() };
+        d.form.template = "";
+        dirty();
+      })
+    );
+    root.querySelector("[data-desadd]")?.addEventListener("click", () => {
+      d.form.rules.push({ action: "allow", service: "https", dest: { kind: "internet" } });
+      dirty();
+    });
+    root.querySelectorAll("[data-desdel]").forEach((b) =>
+      b.addEventListener("click", () => {
+        d.form.rules.splice(+b.dataset.desdel, 1);
+        dirty();
+      })
+    );
+    root.querySelectorAll("[data-desmove]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const [i, dir] = b.dataset.desmove.split(":").map(Number), rs = d.form.rules;
+        if (rs[i + dir]) [rs[i], rs[i + dir]] = [rs[i + dir], rs[i]];
+        dirty();
+      })
+    );
+    const find = root.querySelector("[data-desfind]");
+    find?.addEventListener("input", () => {
+      clearTimeout(this._desFindT);
+      const q = find.value;
+      this._desFindT = setTimeout(() => this._desFind(q), 300);
+    });
+    root.querySelectorAll("[data-deshit]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const h = d.find.hits?.[+b.dataset.deshit];
+        if (!h) return;
+        const known = (d.opts?.services || []).some((s) => s.id === h.id);
+        d.form.rules.push(
+          known
+            ? { action: "allow", service: h.id, dest: { kind: "any" } }
+            : { action: "allow", service: "custom", custom: { proto: h.proto === "TCP/UDP" ? "TCP/UDP" : h.proto, ports: h.ports, name: h.name.replace(/ \(IANA\)$/, "") }, dest: { kind: "any" } }
+        );
+        d.find = { q: "", hits: null };
+        dirty();
+      })
+    );
+  }
+
   async _regPreview() {
     const site = this._sites?.[this._siteIdx];
     if (!site || !this._reg) return;
@@ -2137,7 +2357,7 @@ class OvCirrusNetworkMap extends HTMLElement {
           ].filter(Boolean).map((x) => `<div>${x}</div>`).join("")}</td></tr>`
       )
       .join("");
-    const unpSection = `<section class="net"><div class="nethead static"><ha-icon icon="mdi:badge-account-outline"></ha-icon><b>UNPs (Cirrus access roles)</b><span class="muted">${unps.length} profile${unps.length === 1 ? "" : "s"}</span></div>
+    const unpSection = `${this._des ? this._desPanel() : ""}<section class="net"><div class="nethead static"><ha-icon icon="mdi:badge-account-outline"></ha-icon><b>UNPs (Cirrus access roles)</b><span class="muted">${unps.length} profile${unps.length === 1 ? "" : "s"}</span>${this._isAdmin && !this._des ? `<button class="act" data-desopen title="Design a new UNP with access rules and see what Cirrus would need (preview only)">Design a UNP</button>` : ""}</div>
       ${unps.length && !anyRules ? `<div class="fwnote">None of these UNPs has Cirrus access rules (a policy list): each one only picks the VLAN a device lands on. What that VLAN can reach is decided by the gateway's firewall below. Click a zone to see its rules.</div>` : ""}
       ${nBuiltin ? `<div class="fwnote"><label class="check"><input type="checkbox" data-unpbuiltin ${this._unpBuiltin ? "checked" : ""}> Show Cirrus's ${nBuiltin} built-in profiles (devProf…, default…)</label></div>` : ""}
       ${unps.length ? `<table class="iptable fwtable"><thead><tr><th>UNP</th><th>Assigned to · VLAN</th><th>VLAN → network · zone</th><th class="num">Online</th><th>Other settings</th></tr></thead><tbody>${unpRows}</tbody></table>` : `<div class="empty">${esc(site?.access_error || "No UNPs from Cirrus.")}</div>`}</section>`;
@@ -3226,6 +3446,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       this._fwText = ev.target.value;
       this._render();
     });
+    this._wireDesigner(root);
     root.querySelector("[data-regform]")?.addEventListener("submit", (ev) => {
       ev.preventDefault();
       this._regPreview();
@@ -3422,6 +3643,24 @@ const STYLE = `
   .regsweep { grid-column:1 / -1; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:12px; }
   .regsweep .act { margin:0; }
   .regwarn { color:var(--warning-color,#ffa600); }
+  .destargets, .desrules { grid-column:1 / -1; }
+  .destargets { display:flex; flex-wrap:wrap; gap:4px 14px; align-items:center; }
+  .destargets .sublabel { width:100%; }
+  .regform .destargets label.check { display:inline-flex; flex-direction:row; align-items:center; gap:5px; color:var(--primary-text-color); font-size:13px; }
+  .destable { width:100%; table-layout:fixed; }
+  .destable select { width:100%; }
+  .desrules table { margin:4px 0 6px; }
+  .desrules td { vertical-align:top; }
+  .desrules select, .desrules input { max-width:100%; }
+  .desinline { display:flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+  .desinline input { flex:1 1 110px; min-width:0; }
+  .desbtns { white-space:nowrap; }
+  .desbtns .act { margin:0 2px 0 0; padding:2px 7px; min-width:0; }
+  .desrules .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .desfind { display:flex; gap:8px; align-items:center; flex-wrap:wrap; flex:1 1 260px; }
+  .desfind input { flex:0 1 260px; }
+  .deshits { display:flex; gap:4px; flex-wrap:wrap; }
+  .dessum { display:grid; gap:2px; font-size:12.5px; }
   .fwnote { padding:6px 16px; font-size:12.5px; }
   .fwbody { padding:0 16px 8px; }
   .fwtable td, .fwtable th { vertical-align:top; }
