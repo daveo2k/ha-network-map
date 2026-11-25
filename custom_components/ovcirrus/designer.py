@@ -4,9 +4,9 @@ PREVIEW ONLY. Nothing here talks to Cirrus. It turns a friendly design into the 
 (unified policies -> a policy list -> the Access Role Profile with its assignments) and checks them against what
 the integration already knows, so the result can be read before any write step exists.
 
-The request shapes follow Cirrus's published OpenAPI spec, which has gaps and contradictions (for example the
-policy action is "pos" in one place and "qos" in another, and the service protocol enum reads "UCP"). They are
-to be confirmed against a UNP built by hand in Cirrus before anything is sent.
+The request shapes follow Cirrus's published OpenAPI spec, corrected against a unified policy built by hand in
+Cirrus (action under "qos" with DROP/ACCEPT, YES/IGNORE option flags, port ranges as "22:22"). Policy lists and
+the UNP that uses one are still to be confirmed against a hand-built example before anything is sent.
 """
 
 from __future__ import annotations
@@ -375,16 +375,18 @@ def build_preview(design: dict, ctx: dict) -> dict:
     pa = _policy_assignment(targets)
     for p in policies:
         requests.append({"method": "POST", "path": f"{base}/unified-policies", "purpose": f"Switch rule: {p.pop('why')}",
-                         "body": {"policy": p["policy"], "assignment": pa}})
+                         "body": {"policy": p["policy"]}})  # hand-built policies carry no assignment of their own
     if policies:
         requests.append({"method": "POST", "path": f"{base}/unified-policy-lists", "purpose": "Group the rules into one policy list",
                          "body": {"policyList": {"name": plist, "policies": [p["policy"]["name"] for p in policies]}, "assignment": pa}})
-    arp = {"arpName": name, "useExistingPolicyList": bool(policies)}
+    # Matches the "Test" UNP built by hand: an existing list referenced by name with its policy names.
+    arp = {"arpName": name, "useExistingPolicyList": bool(policies), "useExistingAclAndQos": False,
+           "useExistingLocationPolicy": True, "useExistingPeriodPolicy": True}
     if policies:
-        arp["policyList"] = {"name": plist}
+        arp["policyList"] = {"name": plist, "policies": [p["policy"]["name"] for p in policies]}
     requests.append({"method": "POST", "path": f"{base}/arps", "purpose": "Create the UNP (Access Role Profile) and map its VLAN on each target",
                      "body": {"arp": arp, "assignment": assignment}})
-    notes.append("Request shapes come from Cirrus's API documentation and still need checking against a UNP built by hand in Cirrus.")
+    notes.append("Request shapes are checked against a UNP, policy list and policies built by hand in Cirrus; the POST bodies themselves are untested until a write step exists.")
     notes.append("Changes reach the switches at their next rediscovery, which can take up to an hour.")
     return {
         "ok": not errors,
@@ -467,22 +469,25 @@ def _policy(unp: str, n: int, svc: dict, proto: str | None, rng: tuple[int, int]
         cond["l4Services"] = {"protocol": proto}
         if rng:
             a, b = rng
-            cond["l4Services"]["dstPortRange"] = f"{a}-{b}" if a != b else str(a)
+            cond["l4Services"]["dstPortRange"] = f"{a}:{b}"  # Cirrus stores "22:22" even for one port
     pol = {
         "name": f"{unp}-{n:02d}-{_slug(svc['name'] if svc['id'] == 'custom' and svc['name'] else svc['id'])}"[:NAME_MAX],
         "condition": cond,
-        "action": {"pos": {"disposition": action}},
-        "advancedOptions": {"enabled": "true", "reflexive": "true" if action == "Accept" else "false"},
-        "validityPeriod": {"type": "ALL_THE_TIME", "allTheTime": True},
+        # Shapes match policies hand-built in Cirrus ("Block SSH" and "Allow ICMP"): action.qos with DROP/ACCEPT,
+        # YES/IGNORE flags. Cirrus leaves reflexive at IGNORE for allow rules too, so the designer does the same.
+        "action": {"qos": {"disposition": action.upper(), "priority": 0}},
+        "advancedOptions": {"enabled": "YES", "reflexive": "IGNORE",
+                            "logMatches": "NO", "save": "YES", "sendTrap": "IGNORE", "defaultList": "NO"},
+        "validityPeriod": {"type": "ALL_THE_TIME"},
     }
     return {"policy": pol, "why": why}
 
 
 def _assignment(targets: list[dict], vlan: int | None) -> dict:
-    mapping = {"mappingType": "Vlan", "vlans": [str(vlan or 0)]}
-    groups = [{"deviceGroupId": t["group_id"], "siteId": t.get("site_id"), "vlanTunnelMapping": mapping} for t in targets if t.get("group_id")]
-    devices = [{"deviceMac": t["device_mac"], "deviceSN": t.get("device_sn"), "siteId": t.get("site_id"), "vlanTunnelMapping": mapping}
-               for t in targets if t.get("device_mac")]
+    # Only the fields the API spec lists for a write (site and serial are read-side extras).
+    mapping = {"mappingType": "Vlan", "useExistingTunnel": False, "vlans": [str(vlan or 0)]}
+    groups = [{"deviceGroupId": t["group_id"], "vlanTunnelMapping": mapping} for t in targets if t.get("group_id")]
+    devices = [{"deviceMac": t["device_mac"], "vlanTunnelMapping": mapping} for t in targets if t.get("device_mac")]
     mode = "DEVICE_GROUP_AND_DEVICE" if groups and devices else "DEVICE_GROUP" if groups else "DEVICE_MAC"
     return {"deviceGroups": groups, "devices": devices, "mode": mode}
 
