@@ -459,10 +459,17 @@ def build_preview(design: dict, ctx: dict) -> dict:
     if len(policies) > 60:
         warnings.append(f"{len(policies)} switch rules: large lists use more ACL space on the switches and APs.")
 
-    # Highest precedence first (first rule wins); confirm against a hand-built example before writing.
+    # OmniSwitch applies the matching rule with the highest precedence, so number them counting down from the
+    # first rule; every switch rule gets its own number (equal numbers leave the order to the switch).
     total = len(policies)
+    rule_prec: dict[str, list[int]] = {}  # design rule number ("deny" for the implicit deny) -> [highest, lowest]
     for idx, p in enumerate(policies):
-        p["policy"]["precedence"] = (total - idx) * 10
+        prec = (total - idx) * 10
+        p["policy"]["precedence"] = prec
+        m = re.match(r"rule (\d+)", p["why"])
+        key = m.group(1) if m else "deny"
+        lo_hi = rule_prec.setdefault(key, [prec, prec])
+        lo_hi[0], lo_hi[1] = max(lo_hi[0], prec), min(lo_hi[1], prec)
 
     # Every port range uses Cirrus's own service port when one matches; otherwise a new one is created first,
     # named the way Cirrus's own form names them ("MQTT (1883)", "Plex (32400)", "DHCP (67-68)").
@@ -515,6 +522,7 @@ def build_preview(design: dict, ctx: dict) -> dict:
         "summary": summary,
         "network": vnet and {k: vnet.get(k) for k in ("name", "cidr", "gateway")},
         "policy_count": len(policies),
+        "rule_precedence": rule_prec,
         "requests": requests if not errors else [],
     }
 

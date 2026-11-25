@@ -2104,9 +2104,15 @@ class OvCirrusNetworkMap extends HTMLElement {
         .map((n) => opt(`network:${n.id}`, `${n.name} · ${n.cidr}`, cur === `network:${n.id}`))
         .join("")}</optgroup>${opt("cidr", "An address or range…", cur === "cidr")}</select>`;
     };
+    const precText = (k) => {
+      const n = d.numbers?.[k];
+      if (!d.numbers) return `<span class="muted">…</span>`;
+      if (!n) return `<span class="muted" title="This rule has a problem; Preview says what">–</span>`;
+      return n[0] === n[1] ? `${n[0]}` : `<span title="This rule becomes ${(n[0] - n[1]) / 10 + 1} switch rules">${n[0]}–${n[1]}</span>`;
+    };
     const ruleRows = f.rules
       .map(
-        (r, i) => `<tr><td class="num">${i + 1}</td>
+        (r, i) => `<tr><td class="num">${i + 1}</td><td class="num desprec">${precText(String(i + 1))}</td>
           <td><select data-desrule="${i}" data-desk="action">${opt("allow", "Allow", r.action === "allow")}${opt("block", "Block", r.action !== "allow")}</select></td>
           <td>${svcSelect(r, i)}${
             r.service === "custom"
@@ -2123,7 +2129,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     const endsBlocked = last && last.action !== "allow" && (last.service || "any") === "any" && (last.dest?.kind || "any") === "any";
     const allowsAll = f.rules.some((r) => r.action === "allow" && (r.service || "any") === "any" && ["any", "internet"].includes(r.dest?.kind || "any"));
     const denyRow = f.default_deny !== false && f.rules.length && !endsBlocked && !allowsAll
-      ? `<tr class="desimplicit"><td class="num">${f.rules.length + 1}</td><td>Block</td><td>Anything</td><td>Anywhere</td><td class="muted">added</td></tr>`
+      ? `<tr class="desimplicit"><td class="num">${f.rules.length + 1}</td><td class="num desprec">${precText("deny")}</td><td>Block</td><td>Anything</td><td>Anywhere</td><td class="muted">added</td></tr>`
       : "";
     const hits = d.find.hits;
     const findHtml = `<div class="desfind"><input type="search" data-desfind placeholder="Find a service or port (e.g. mysql, 3306)" value="${esc(d.find.q)}">${
@@ -2162,11 +2168,39 @@ class OvCirrusNetworkMap extends HTMLElement {
         <label>Start from<select data-destemplate>${opt("", "Pick a template…", !f.template)}${o.templates.map((t) => opt(t.id, t.name, f.template === t.id, ` title="${esc(t.description)}"`)).join("")}</select></label>
         <div class="destargets"><div class="sublabel">Apply to</div>${targets || `<span class="muted">${d.busy ? "Loading…" : "No switches or AP groups known."}</span>`}</div>
         <div class="desrules"><div class="sublabel">Access rules <span class="muted">checked top to bottom; the first that matches decides</span></div>
-          ${f.rules.length ? `<table class="iptable destable"><colgroup><col style="width:28px"><col style="width:92px"><col><col style="width:34%"><col style="width:96px"></colgroup><thead><tr><th class="num">#</th><th>Action</th><th>Service</th><th>To</th><th></th></tr></thead><tbody>${ruleRows}${denyRow}</tbody></table>` : `<div class="muted">No rules: the UNP only sets the VLAN (as your UNPs do today).</div>`}
+          ${f.rules.length ? `<table class="iptable destable"><colgroup><col style="width:28px"><col style="width:84px"><col style="width:92px"><col><col style="width:34%"><col style="width:96px"></colgroup><thead><tr><th class="num">#</th><th class="num" title="The number each switch rule gets in Cirrus. Higher wins: when several rules match, the switch applies the one with the highest number. Move rules with ↑ ↓ to change it.">Precedence</th><th>Action</th><th>Service</th><th>To</th><th></th></tr></thead><tbody>${ruleRows}${denyRow}</tbody></table>` : `<div class="muted">No rules: the UNP only sets the VLAN (as your UNPs do today).</div>`}
           <label class="check desdeny" title="Switches allow anything no rule matches. With this on, a last rule blocks everything your rules don't allow, like a firewall's implicit deny."><input type="checkbox" data-desdeny ${f.default_deny !== false ? "checked" : ""}> Block everything else (like a firewall's implicit deny)</label>
           <div class="row"><button type="button" class="act ghost" data-desadd>Add rule</button>${findHtml}</div></div>
         <div class="row"><button class="act" type="submit" ${d.busy ? "disabled" : ""}>${d.busy ? "Checking…" : "Preview"}</button></div>
       </form>${result}</section>`;
+  }
+
+  _desDesign() {
+    const f = this._des.form;
+    return { name: f.name, vlan: f.vlan === "" ? null : f.vlan, targets: f.targets, rules: f.rules, default_deny: f.default_deny !== false };
+  }
+
+  // Number the rules as the preview would (precedence per design rule), without showing the whole preview.
+  _desNumber() {
+    clearTimeout(this._desNumT);
+    const d = this._des, site = this._sites?.[this._siteIdx];
+    if (!d || !site) return;
+    if (!d.form.rules.length) {
+      d.numbers = {};
+      return;
+    }
+    this._desNumT = setTimeout(async () => {
+      const design = JSON.stringify(this._desDesign());
+      try {
+        const res = await this._hass.callWS({ type: "ovcirrus/unp_design_preview", entry_id: site.entry_id, design: JSON.parse(design) });
+        if (this._des === d && JSON.stringify(this._desDesign()) === design) {
+          d.numbers = res.rule_precedence || {};
+          this._render();
+        }
+      } catch (err) {
+        /* the numbers are a convenience; Preview shows any error */
+      }
+    }, 350);
   }
 
   async _desPreview() {
@@ -2176,9 +2210,8 @@ class OvCirrusNetworkMap extends HTMLElement {
     this._des.err = null;
     this._render();
     try {
-      const f = this._des.form;
-      const design = { name: f.name, vlan: f.vlan === "" ? null : f.vlan, targets: f.targets, rules: f.rules, default_deny: f.default_deny !== false };
-      this._des.preview = await this._hass.callWS({ type: "ovcirrus/unp_design_preview", entry_id: site.entry_id, design });
+      this._des.preview = await this._hass.callWS({ type: "ovcirrus/unp_design_preview", entry_id: site.entry_id, design: this._desDesign() });
+      this._des.numbers = this._des.preview.rule_precedence || {};
     } catch (err) {
       this._des.err = `Preview failed: ${err?.message || err}`;
     }
@@ -2205,7 +2238,9 @@ class OvCirrusNetworkMap extends HTMLElement {
     if (!d) return;
     const dirty = () => {
       d.preview = null;
+      d.numbers = null;
       this._render();
+      this._desNumber();
     };
     root.querySelector("[data-desclose]")?.addEventListener("click", () => {
       this._des = null;
@@ -3663,6 +3698,7 @@ const STYLE = `
   .destable { width:100%; table-layout:fixed; }
   .destable select { width:100%; }
   .destable tr.desimplicit td { color:var(--secondary-text-color); font-style:italic; }
+  .destable td.desprec { font-variant-numeric:tabular-nums; white-space:nowrap; }
   .regform label.check.desdeny, label.check.desdeny { display:flex; flex-direction:row; align-items:center; gap:6px; margin:6px 0; color:var(--primary-text-color); font-size:13px; }
   .desrules table { margin:4px 0 6px; }
   .desrules td { vertical-align:top; }
