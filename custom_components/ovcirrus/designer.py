@@ -598,6 +598,9 @@ def _policy(unp: str, n: int, svc: dict, proto: str | None, rng: tuple[int, int]
         if rng:
             a, b = rng
             cond["l4Services"]["dstPortRange"] = f"{a}:{b}"  # Cirrus stores "22:22" even for one port
+    if not cond:
+        # "Anything to anywhere": Cirrus stores it as 0.0.0.0/0 both ways (from a hand-built "Drop everything").
+        cond["l3Ips"] = {"srcIpAddress": "0.0.0.0", "srcMask": "0.0.0.0", "dstIpAddress": "0.0.0.0", "dstMask": "0.0.0.0"}
     pol = {
         "name": f"{unp}-{n:02d}-{_slug(svc['name'] if svc['id'] == 'custom' and svc['name'] else svc['id'])}"[:NAME_MAX],
         "condition": cond,
