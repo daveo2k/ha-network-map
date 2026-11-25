@@ -78,6 +78,46 @@ from .unifi import UnifiClient, UnifiError
 _LOGGER = logging.getLogger(__name__)
 
 
+def _iot_profiles(rows: list[dict]) -> dict[str, dict]:
+    """Cirrus IoT inventory rows -> {MAC: profile}. A MAC can have a row per place it was seen; the best
+    scored category wins and the DHCP options and looked-up hosts are merged."""
+
+    def hosts(v: Any) -> list[str]:
+        v = (v or "").strip().strip("[]")
+        return [h.strip().strip("'\"") for h in v.split(",") if h.strip().strip("'\"")]
+
+    out: dict[str, dict] = {}
+    for r in sorted(rows, key=lambda r: str(r.get("updated_at") or "")):
+        mac = norm_mac(r.get("endpoint_mac"))
+        if not mac:
+            continue
+        p = out.setdefault(mac, {"category": None, "score": 0, "name": None, "manufacturer": None, "opt55": None,
+                                 "opt60": None, "hosts": [], "user_agents": [], "seen_on": [], "updated": None})
+        try:
+            score = int(r.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        if r.get("category_hierarchy") and score >= (p["score"] or 0):
+            p["category"], p["score"], p["name"] = r["category_hierarchy"], score, r.get("endpoint_name") or None
+        man = r.get("manufacturer")
+        if man and man.lower() != "private":
+            p["manufacturer"] = man
+        for key, src in (("opt55", "prof_opt55"), ("opt60", "prof_opt60")):
+            if r.get(src):
+                p[key] = r[src]
+        for h in hosts(r.get("prof_hosts")):
+            if h not in p["hosts"]:
+                p["hosts"].append(h)
+        for h in hosts(r.get("prof_user_agents")):
+            if h not in p["user_agents"]:
+                p["user_agents"].append(h)
+        where = " · ".join(x for x in (r.get("device_name"), r.get("nwcontext_port_description") or r.get("nwcontext_port")) if x)
+        if where and where not in p["seen_on"]:
+            p["seen_on"].insert(0, where)  # newest first
+        p["updated"] = r.get("updated_at") or p["updated"]
+    return out
+
+
 @dataclass
 class CirrusData:
     """Snapshot of everything fetched in one refresh."""
@@ -108,6 +148,7 @@ class CirrusData:
     alerts_error: str | None = None
     alerts_raw: dict = field(default_factory=dict)  # alert id -> the record as Cirrus sent it (for the details view)
     ipam: dict = field(default_factory=dict)  # see ipam.build_ipam
+    iot: dict = field(default_factory=dict)  # MAC -> Cirrus IoT inventory profile (see _iot_profiles)
     unifi_firewall: dict = field(default_factory=dict)  # raw UniFi firewall parts (see UnifiClient.firewall)
     firewall: dict = field(default_factory=dict)  # see firewall.build
     maps: dict[str, dict] = field(default_factory=dict)  # site_id -> card tree
@@ -334,6 +375,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             data.topology, data.lldp, data.ports = prev.topology, prev.lldp, prev.ports
             data.port_vlans, data.vlans = prev.port_vlans, prev.vlans
             data.ip_interfaces, data.unps = prev.ip_interfaces, {k: dict(v) for k, v in prev.unps.items()}
+            data.iot = prev.iot
 
         for topo in data.topology.values():
             for node in topo.get("nodes") or []:
@@ -404,6 +446,12 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
         except CirrusError as err:  # optional: needs UPAM rights
             _LOGGER.debug("Access Role Profiles failed: %s", err)
             data.unps = {k: {**v, "clients": 0, "seen_vlans": []} for k, v in prev.unps.items()}
+
+        try:
+            data.iot = _iot_profiles(await self.client.get_iot_inventory(self.org_id, list(data.sites)))
+        except CirrusError as err:  # optional: needs rights to the IoT inventory
+            _LOGGER.debug("IoT inventory failed: %s", err)
+            data.iot = prev.iot
 
     async def _arps_with_assignments(self) -> list[dict]:
         """The ARP list, with each ARP's assignments replaced by the detailed ones (which carry the VLAN per
@@ -617,6 +665,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
             override = self.store.overrides.get(mac) or {}
             hostname = info.get("hostname") or uc.get("hostname")
             oui = None if is_private_mac(mac) else self.assets.vendor(mac)
+            prof = data.iot.get(mac) or {}
             ident = identify(
                 mac,
                 hostname,
@@ -626,6 +675,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 ha=ha.get(mac),
                 unifi_vendor=uc.get("oui"),
                 override_type=override.get("type"),
+                profile=prof,
             )
             if uc.get("name"):
                 ident.sources.append("UniFi")
@@ -644,6 +694,7 @@ class CirrusCoordinator(DataUpdateCoordinator[CirrusData]):
                 "logo": self.assets.logo(ident.logo_sources),
                 "sources": list(dict.fromkeys(ident.sources)),
                 "overridden": bool(override),
+                "profile": prof or None,
             }
         return identities
 

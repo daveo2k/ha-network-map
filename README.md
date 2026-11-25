@@ -144,10 +144,13 @@ Every client, including ones the integration has never seen before, is identifie
 | IEEE MAC vendor registry (downloaded once, refreshed monthly) | Manufacturer from the MAC prefix |
 | Hostname patterns | Type and brand (`iPhone`, `SonosZP`, `P110M`, `NIBE-…`, `amazon-…`) |
 | Cirrus fingerprint | OS / device type |
+| Cirrus device profiling (IoT inventory, read-only) | Category and a 0–100 score, from the DHCP options the device sent (55, 60) and the hosts it looked up |
 | Home Assistant device registry | Exact model and integration, when another integration knows the MAC |
 | UniFi gateway (optional) | Names you set in UniFi, hostnames and IPs |
 
 Brand logos come from Home Assistant's brand images or Simple Icons. Switch and gateway images and exact OmniSwitch port layouts come from the [NetBox device-type library](https://github.com/netbox-community/devicetype-library) (CC0). All of these are downloaded the first time they are needed, then cached in `/config/ovcirrus_cache`. Your own photos in `/config/www/ovcirrus/<model>.png` always win.
+
+Cirrus's profiling only sets a device's type when the match is specific (a camera, a thermostat, a TV…) and scores at least 50. Vague matches such as "Embedded OS" never rename a device: they show in its details as **Cirrus profile**, with the score and the evidence (DHCP request list, vendor class, hosts looked up, and where it was profiled), so you can judge them yourself. The UniFi gateway's own fingerprint guess is not used.
 
 Admins can rename a device or change its type from the map's details panel; this is stored against the MAC.
 

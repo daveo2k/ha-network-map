@@ -1846,6 +1846,13 @@ class OvCirrusNetworkMap extends HTMLElement {
     return null;
   }
 
+  _nodeByIp(ip) {
+    if (!ip || !this._index) return null;
+    for (const n of this._index.values())
+      if (n.ip === ip || (n.details || []).some(([k, v]) => k === "IP" && v === ip)) return n;
+    return null;
+  }
+
   _goto(mac) {
     const node = this._macOnMap(mac);
     if (!node) return;
@@ -2338,7 +2345,7 @@ class OvCirrusNetworkMap extends HTMLElement {
       const hist = d.client_history;
       const histHtml = hist == null ? "" : hist.length
         ? `<div class="adbox wide"><h4>This client's alerts in Cirrus (30 days) <span class="muted">${d.client_total || hist.length}${(d.client_total || 0) > 25 ? ", newest 25 shown" : ""}</span></h4><table class="adhist">${hist.slice(0, 25)
-            .map((h) => `<tr class="${h.acknowledged ? "acked" : ""}${h.id === a.id ? " cur" : ""}"><td>${esc(when(h.time))}</td><td><span class="pill sev ${esc(h.severity || "")}">${esc(h.severity || "–")}</span></td><td>${esc(h.type || "")}${h.reason ? ` <span class="muted">${esc(h.reason)}</span>` : ""}</td><td>${esc(h.device || "")}${h.ssid ? ` <span class="muted">${esc(h.ssid)}</span>` : ""}</td></tr>`)
+            .map((h) => `<tr class="${h.acknowledged ? "acked" : ""}${h.id === a.id ? " cur" : ""}"><td>${esc(when(h.time))}</td><td><span class="pill sev ${esc(h.severity || "")}">${esc(h.severity || "–")}</span></td><td>${esc(h.type || "")}${h.reason ? ` <span class="muted">${esc(h.reason)}</span>` : ""}</td><td>${esc(this._nodeByIp(h.device)?.name || h.device || "")}${h.ssid ? ` <span class="muted">${esc(h.ssid)}</span>` : ""}</td></tr>`)
             .join("")}</table></div>`
         : `<div class="adbox wide"><h4>This client's alerts in Cirrus (30 days)</h4><div class="muted">None other than this.</div></div>`;
       const errs = Object.entries(d.errors || {}).map(([k, e]) => `<div class="muted">Couldn't read ${k === "client_history" ? "the client's alert history" : "alert definitions"}: ${esc(e)}</div>`).join("");

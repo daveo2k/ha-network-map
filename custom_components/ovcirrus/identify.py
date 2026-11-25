@@ -8,6 +8,7 @@ Cirrus fingerprint, Home Assistant's device registry and (optionally) UniFi.
 from __future__ import annotations
 
 import re
+from typing import Any
 from dataclasses import dataclass, field
 
 TYPES: dict[str, tuple[str, str]] = {
@@ -242,6 +243,47 @@ class Identity:
         return self.type_label
 
 
+# Cirrus IoT inventory categories ("A/B/C") -> our type. First match wins; generic ones ("Embedded OS",
+# "Generic IoT") give no type on their own: they say little, so they only show in the device's details.
+PROFILE_RULES: list[tuple[re.Pattern, str]] = [
+    (re.compile(p, re.I), t)
+    for p, t in [
+        (r"ipad|tablet", "tablet"),
+        (r"phone|mobile device|android os|ios$|apple mobile|wearable", "phone"),
+        (r"mac os|macos", "laptop"),
+        (r"windows os|linux os/(ubuntu|debian|fedora)|chrome os", "computer"),
+        (r"camera", "camera"),
+        (r"doorbell", "doorbell"),
+        (r"thermostat", "thermostat"),
+        (r"television|streaming|media player|roku|chromecast|apple tv|fire tv", "tv"),
+        (r"echo|alexa|google home|smart speaker", "voice"),
+        (r"audio player|sonos|speaker", "speaker"),
+        (r"printer|scanner", "printer"),
+        (r"openwrt|router|access point|network (device|equipment)", "network"),
+        (r"nas|storage", "nas"),
+        (r"game console|playstation|xbox|nintendo", "console"),
+        (r"smart plug|power outlet", "plug"),
+        (r"light|bulb|lighting", "light"),
+        (r"espressif|tuya|smart home|home automation|iot modules|texas instruments iot", "iot"),
+    ]
+]
+PROFILE_MIN_SCORE = 50  # Cirrus scores 0-100; below this its guess is not used for the type
+
+
+def profile_type(category: str | None, score: Any) -> str | None:
+    """Our device type from a Cirrus IoT inventory category, if it is specific and scored well enough."""
+    try:
+        ok = float(score or 0) >= PROFILE_MIN_SCORE
+    except (TypeError, ValueError):
+        ok = False
+    if not ok or not category:
+        return None
+    for pattern, typ in PROFILE_RULES:
+        if pattern.search(category):
+            return typ
+    return None
+
+
 def identify(
     mac: str | None,
     hostname: str | None = None,
@@ -251,6 +293,7 @@ def identify(
     ha: HaDevice | None = None,
     unifi_vendor: str | None = None,
     override_type: str | None = None,
+    profile: dict | None = None,
 ) -> Identity:
     ident = Identity(private_mac=is_private_mac(mac))
     vendor = normalise_vendor(oui_vendor) or normalise_vendor(unifi_vendor)
@@ -276,6 +319,10 @@ def identify(
         cirrus = "laptop"
     if cirrus:
         ident.sources.append("Cirrus fingerprint")
+
+    prof_type = profile_type((profile or {}).get("category"), (profile or {}).get("score"))
+    if prof_type:
+        ident.sources.append("Cirrus profiling")
 
     ha_type = None
     if ha and (ha.domain or ha.model):
@@ -304,6 +351,7 @@ def identify(
         override_type
         or ha_type
         or host_type
+        or prof_type
         or cirrus
         or VENDOR_TYPES.get(brand or "")
         or vendor_type

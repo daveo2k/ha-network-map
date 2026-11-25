@@ -136,6 +136,27 @@ class CirrusClient:
                 raise CirrusApiError(f"{path}: {err}") from err
         raise CirrusApiError(f"{path}: retry exhausted")
 
+    async def get_iot_inventory(self, org_id: str, site_ids: list[str], days: int = 30) -> list[dict]:
+        """Cirrus's device profiling (Configure > IoT inventory): per client MAC, the DHCP options it sent
+        (55 parameter list, 60 vendor class), hosts it looked up, the category it was matched to and a score.
+        One row per place a MAC was seen. Read-only."""
+        now = datetime.now(timezone.utc)
+        iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%S.") + f"{t.microsecond // 1000:03d}Z"  # noqa: E731
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            data = await self._get(
+                f"/ov/v1/organizations/{org_id}/iot/inventory",
+                {"startDate": iso(now - timedelta(days=days)), "endDate": iso(now), "latest": "true",
+                 "limit": 500, "offset": offset, "scope": "site", "scopeId[]": site_ids},
+                optional=True,
+            )
+            batch = (data.get("result") or []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+            rows.extend(r for r in batch if isinstance(r, dict))
+            if len(batch) < 500 or offset > 20000:
+                return rows
+            offset += 500
+
     async def get_alert_definitions(self, org_id: str) -> list[dict]:
         """Alert definitions (name, category, severity, enabled) for the organization. Read-only."""
         data = await self._get(f"/ov/v1/organizations/{org_id}/alerts/definitions", optional=True)

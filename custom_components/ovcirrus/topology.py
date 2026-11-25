@@ -203,6 +203,33 @@ def identity_details(ident: dict | None) -> list[tuple[str, Any]]:
         ("Model", ident.get("model")),
         ("MAC address type", "private (randomised)" if ident.get("private_mac") else None),
         ("Identified by", ", ".join(ident.get("sources") or []) or None),
+        *profile_details(ident.get("profile")),
+    ]
+
+
+# Well-known DHCP option 55 lists, so the raw numbers mean something. Only exact matches are named.
+OPT55_HINTS = {
+    "1,3,28,6": "lwIP network stack, typical of ESP8266/ESP32-type Wi-Fi modules and similar embedded devices",
+}
+
+
+def profile_details(prof: dict | None) -> list[tuple[str, Any]]:
+    """Cirrus's own device profiling (IoT inventory), shown as it is: the category and its score, and the
+    evidence behind it, so a vague match stays visibly vague."""
+    if not prof:
+        return []
+    cat = prof.get("category")
+    leaf = cat.split("/")[-1] if cat else None
+    o55 = prof.get("opt55")
+    return [
+        ("Cirrus profile", f"{leaf} (score {prof.get('score') or 0}/100)" if leaf else "not matched"),
+        ("Profile category", cat if cat and cat != leaf else None),
+        ("Profile maker", prof.get("manufacturer")),
+        ("DHCP request list (55)", f"{o55} · {OPT55_HINTS[o55]}" if o55 in OPT55_HINTS else o55),
+        ("DHCP vendor class (60)", prof.get("opt60")),
+        ("Looked up", ", ".join(prof.get("hosts")[:6]) if prof.get("hosts") else None),
+        ("Browser / agent", ", ".join(prof.get("user_agents")[:3]) if prof.get("user_agents") else None),
+        ("Profiled on", "; ".join(prof.get("seen_on")[:4]) if prof.get("seen_on") else None),
     ]
 
 
