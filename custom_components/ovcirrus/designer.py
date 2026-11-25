@@ -135,7 +135,6 @@ TEMPLATES: list[dict] = [
             {"action": "allow", "service": "ntp", "dest": {"kind": "internet"}},
             {"action": "allow", "service": "any", "dest": {"kind": "ha"}},
             {"action": "allow", "service": "https", "dest": {"kind": "internet"}},
-            {"action": "block", "service": "any", "dest": {"kind": "any"}},
         ],
     },
     {
@@ -308,7 +307,8 @@ def _mask(net: ipaddress.IPv4Network) -> tuple[str, str]:
 
 
 def build_preview(design: dict, ctx: dict) -> dict:
-    """design: {name, vlan, targets:[target ids], rules:[{action, service, custom, dest:{kind, network_id, cidr}}]}
+    """design: {name, vlan, targets:[target ids], rules:[{action, service, custom, dest:{kind, network_id, cidr}}],
+               default_deny (default true: block everything the rules don't allow, like a firewall)}
     ctx: {org_id, networks, targets:[{id, kind, name, group_id|device_mac, device_sn, site_id, devices?}], unps:[names],
           vlans:[ints], ha_ip, iana}
     Returns {ok, errors, warnings, notes, summary, requests}. Sends nothing."""
@@ -437,10 +437,25 @@ def build_preview(design: dict, ctx: dict) -> dict:
                 policies.append(_policy(name, len(policies) + 1, svc, proto, rng, action, net, f"rule {i}"))
 
     warnings.extend(_shadowed(rules, gw_ip, ha_ip, nets, iana, extra))
+    ends_blocked = bool(rules) and _is_block_all(rules[-1])
+    default_deny = design.get("default_deny", True) is not False
     if not rules:
         notes.append("No access rules: the UNP only picks the VLAN, as your UNPs do today. The gateway firewall decides the rest.")
-    elif rules[-1].get("dest", {}).get("kind") != "any" or rules[-1].get("service") != "any":
-        notes.append("Anything not matched by a rule is allowed (the switches' default). End with 'Block anything to anywhere' for an allow-list.")
+    elif default_deny and not ends_blocked and any(_allows_all(r) for r in rules):
+        notes.append("A rule already allows anything to the internet, so nothing would be left for 'Block everything else' to block; no deny rule is added.")
+    elif default_deny and not ends_blocked:
+        # Like a firewall's implicit deny: switches allow unmatched traffic, so the deny has to be a real last rule.
+        any_svc = {"id": "custom", "name": "deny all", "proto": "", "ports": ""}
+        policies.append(_policy(name, len(policies) + 1, any_svc, None, None, "Drop", None, "block everything else (implicit deny)"))
+        summary.append(f"{len(rules) + 1}. Then block everything else (implicit deny)")
+    elif not default_deny and not ends_blocked:
+        notes.append("Anything not matched by a rule is allowed (the switches' default). Turn on 'Block everything else' for an allow-list.")
+    if rules and (default_deny or ends_blocked):
+        allows = [r for r in rules if r.get("action") == "allow"]
+        if not any(r.get("service") in ("dhcp", "any") and (r.get("dest") or {}).get("kind", "any") in ("any", "internet") for r in allows):
+            warnings.append("Everything else is blocked but no rule allows DHCP to anywhere, so devices won't get an address.")
+        if not any(r.get("service") in ("dns", "dot", "any") for r in allows):
+            warnings.append("Everything else is blocked but no rule allows DNS, so devices can't look up names.")
     if len(policies) > 60:
         warnings.append(f"{len(policies)} switch rules: large lists use more ACL space on the switches and APs.")
 
@@ -524,6 +539,15 @@ def _dest_nets(rule: dict, gw_ip: str | None, ha_ip: str | None, nets: dict) -> 
     except ValueError:
         return None
     return None
+
+
+def _is_block_all(rule: dict) -> bool:
+    return rule.get("action") != "allow" and (rule.get("service") or "any") == "any" and (rule.get("dest") or {}).get("kind", "any") == "any"
+
+
+def _allows_all(rule: dict) -> bool:
+    """An allow of anything to anywhere or to the internet: nothing reaches a later catch-all deny."""
+    return rule.get("action") == "allow" and (rule.get("service") or "any") == "any" and (rule.get("dest") or {}).get("kind", "any") in ("any", "internet")
 
 
 def _shadowed(rules: list[dict], gw_ip, ha_ip, nets: dict, iana: dict, extra: dict | None = None) -> list[str]:

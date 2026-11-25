@@ -2070,7 +2070,7 @@ class OvCirrusNetworkMap extends HTMLElement {
   async _openDesigner() {
     const site = this._sites?.[this._siteIdx];
     if (!site) return;
-    this._des = { form: { name: "", vlan: "", targets: [], rules: [], template: "" }, opts: null, preview: null, busy: true, err: null, find: { q: "", hits: null } };
+    this._des = { form: { name: "", vlan: "", targets: [], rules: [], template: "", default_deny: true }, opts: null, preview: null, busy: true, err: null, find: { q: "", hits: null } };
     this._render();
     try {
       this._des.opts = await this._hass.callWS({ type: "ovcirrus/unp_design_options", entry_id: site.entry_id });
@@ -2119,6 +2119,12 @@ class OvCirrusNetworkMap extends HTMLElement {
           <td class="desbtns"><button type="button" class="act ghost" data-desmove="${i}:-1" ${i ? "" : "disabled"} title="Move up">↑</button><button type="button" class="act ghost" data-desmove="${i}:1" ${i < f.rules.length - 1 ? "" : "disabled"} title="Move down">↓</button><button type="button" class="act ghost" data-desdel="${i}" title="Remove">✕</button></td></tr>`
       )
       .join("");
+    const last = f.rules[f.rules.length - 1];
+    const endsBlocked = last && last.action !== "allow" && (last.service || "any") === "any" && (last.dest?.kind || "any") === "any";
+    const allowsAll = f.rules.some((r) => r.action === "allow" && (r.service || "any") === "any" && ["any", "internet"].includes(r.dest?.kind || "any"));
+    const denyRow = f.default_deny !== false && f.rules.length && !endsBlocked && !allowsAll
+      ? `<tr class="desimplicit"><td class="num">${f.rules.length + 1}</td><td>Block</td><td>Anything</td><td>Anywhere</td><td class="muted">added</td></tr>`
+      : "";
     const hits = d.find.hits;
     const findHtml = `<div class="desfind"><input type="search" data-desfind placeholder="Find a service or port (e.g. mysql, 3306)" value="${esc(d.find.q)}">${
       hits == null ? "" : hits.length
@@ -2156,7 +2162,8 @@ class OvCirrusNetworkMap extends HTMLElement {
         <label>Start from<select data-destemplate>${opt("", "Pick a template…", !f.template)}${o.templates.map((t) => opt(t.id, t.name, f.template === t.id, ` title="${esc(t.description)}"`)).join("")}</select></label>
         <div class="destargets"><div class="sublabel">Apply to</div>${targets || `<span class="muted">${d.busy ? "Loading…" : "No switches or AP groups known."}</span>`}</div>
         <div class="desrules"><div class="sublabel">Access rules <span class="muted">checked top to bottom; the first that matches decides</span></div>
-          ${f.rules.length ? `<table class="iptable destable"><colgroup><col style="width:28px"><col style="width:92px"><col><col style="width:34%"><col style="width:96px"></colgroup><thead><tr><th class="num">#</th><th>Action</th><th>Service</th><th>To</th><th></th></tr></thead><tbody>${ruleRows}</tbody></table>` : `<div class="muted">No rules: the UNP only sets the VLAN (as your UNPs do today).</div>`}
+          ${f.rules.length ? `<table class="iptable destable"><colgroup><col style="width:28px"><col style="width:92px"><col><col style="width:34%"><col style="width:96px"></colgroup><thead><tr><th class="num">#</th><th>Action</th><th>Service</th><th>To</th><th></th></tr></thead><tbody>${ruleRows}${denyRow}</tbody></table>` : `<div class="muted">No rules: the UNP only sets the VLAN (as your UNPs do today).</div>`}
+          <label class="check desdeny" title="Switches allow anything no rule matches. With this on, a last rule blocks everything your rules don't allow, like a firewall's implicit deny."><input type="checkbox" data-desdeny ${f.default_deny !== false ? "checked" : ""}> Block everything else (like a firewall's implicit deny)</label>
           <div class="row"><button type="button" class="act ghost" data-desadd>Add rule</button>${findHtml}</div></div>
         <div class="row"><button class="act" type="submit" ${d.busy ? "disabled" : ""}>${d.busy ? "Checking…" : "Preview"}</button></div>
       </form>${result}</section>`;
@@ -2170,7 +2177,7 @@ class OvCirrusNetworkMap extends HTMLElement {
     this._render();
     try {
       const f = this._des.form;
-      const design = { name: f.name, vlan: f.vlan === "" ? null : f.vlan, targets: f.targets, rules: f.rules };
+      const design = { name: f.name, vlan: f.vlan === "" ? null : f.vlan, targets: f.targets, rules: f.rules, default_deny: f.default_deny !== false };
       this._des.preview = await this._hass.callWS({ type: "ovcirrus/unp_design_preview", entry_id: site.entry_id, design });
     } catch (err) {
       this._des.err = `Preview failed: ${err?.message || err}`;
@@ -2216,6 +2223,10 @@ class OvCirrusNetworkMap extends HTMLElement {
       let v = ev.target.value;
       if (v === "other") v = (prompt("VLAN number (1–4094)") || "").trim();
       d.form.vlan = v;
+      dirty();
+    });
+    root.querySelector("[data-desdeny]")?.addEventListener("change", (ev) => {
+      d.form.default_deny = ev.target.checked;
       dirty();
     });
     root.querySelector("[data-destemplate]")?.addEventListener("change", (ev) => {
@@ -3651,6 +3662,8 @@ const STYLE = `
   .regform .destargets label.check { display:inline-flex; flex-direction:row; align-items:center; gap:5px; color:var(--primary-text-color); font-size:13px; }
   .destable { width:100%; table-layout:fixed; }
   .destable select { width:100%; }
+  .destable tr.desimplicit td { color:var(--secondary-text-color); font-style:italic; }
+  .regform label.check.desdeny, label.check.desdeny { display:flex; flex-direction:row; align-items:center; gap:6px; margin:6px 0; color:var(--primary-text-color); font-size:13px; }
   .desrules table { margin:4px 0 6px; }
   .desrules td { vertical-align:top; }
   .desrules select, .desrules input { max-width:100%; }
