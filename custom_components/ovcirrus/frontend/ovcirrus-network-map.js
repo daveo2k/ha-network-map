@@ -1461,12 +1461,25 @@ class OvCirrusNetworkMap extends HTMLElement {
           }
           const style = sv !== null && m && carries(m, sv) ? ` style="--c:${vlanColor(sv)}"` : "";
           const lane = e.toGroup ? e.toGroup._lane : e.to?._lane;
-          if (lane?.length) {
+          const tx = lane?.length ? Math.min(...lane.map((b) => (b._bx ?? b._x))) - 12 : 0;
+          const ty = lane?.length ? Math.min(...lane.map((b) => b._y)) - 8 : 0;
+          const bus = e.toGroup ? y2 - 10 : y2 - LABEL_ROW - 10, k = 6;
+          // Only detour when what was above it still is: once it is dragged level with or above those devices,
+          // or to their left, the direct curve is the right link.
+          if (lane?.length && ty + 2 * k < bus && y1 < ty && tx < Math.min(x1, x2)) {
             // Devices are above it (a wrapped row or a lower box): go down the left of them, then along above it.
-            const tx = Math.min(...lane.map((b) => (b._bx ?? b._x))) - 12;
-            const ty = Math.min(...lane.map((b) => b._y)) - 8;
-            const bus = e.toGroup ? y2 - 10 : y2 - LABEL_ROW - 10, k = 6;
             return `<path class="${lineCls(e.status, m)}"${style} d="M${x1},${y1} C${x1},${(y1 + ty) / 2} ${tx},${(y1 + ty) / 2} ${tx},${ty + k} V${bus - k} Q${tx},${bus} ${tx + k},${bus} H${x2 - k} Q${x2},${bus} ${x2},${bus + k} V${y2}"/>`;
+          }
+          // Placed beside its switch rather than below it (dragged there): leave from the side facing it, run up
+          // or down a gutter just short of it, then over the top into it, where its port label sits.
+          const tb = e.toGroup ? { l: e.toGroup._bx, r: e.toGroup._bx + e.toGroup._w } : { l: e.to._x, r: e.to._x + e.to._cw };
+          const fl = e.from._x, fr = e.from._x + e.from._cw;
+          const right = tb.l > fr + 40, left = tb.r < fl - 40;
+          if (bus < y1 + 10 && (right || left)) {
+            const sx = right ? fr + 6 : fl - 6, sy = e.from._y + e.from._ch / 2;
+            const gx = right ? Math.max(sx + 2 * k, tb.l - 16) : Math.min(sx - 2 * k, tb.r + 16);
+            const dir = right ? 1 : -1, up = bus < sy ? -1 : 1, toward = x2 > gx ? 1 : -1;
+            return `<path class="${lineCls(e.status, m)}"${style} d="M${sx},${sy} H${gx - dir * k} Q${gx},${sy} ${gx},${sy + up * k} V${bus - up * k} Q${gx},${bus} ${gx + toward * k},${bus} H${x2 - toward * k} Q${x2},${bus} ${x2},${bus + k} V${y2}"/>`;
           }
           return `<path class="${lineCls(e.status, m)}"${style} d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}"/>`;
         })
